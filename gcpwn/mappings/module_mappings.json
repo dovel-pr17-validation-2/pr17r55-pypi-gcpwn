@@ -1,0 +1,1303 @@
+{
+  "schema_version": 2,
+  "services": [
+    {
+      "service": "API Gateway",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_apigateway",
+            "info_blurb": "Enumerate API Gateway gateways, APIs, and API configs, with optional direct targeting by ID and testIamPermissions.",
+            "location": "gcpwn.modules.gcp.apigateway.enumeration.enum_apigateway"
+          }
+        ],
+        "Exploit": [
+          {
+            "module_name": "exploit_apigateway_as_sa_oidc",
+            "info_blurb": "Privilege escalation via API Gateway: deploy a gateway config that issues a Google-signed OIDC JWT as the target SA to a callback URL. REQUIRES apigateway.{apis,apiconfigs,gateways}.create + iam.serviceAccounts.actAs on target SA. Use --wif-provider to exchange the OIDC JWT for a full federated access token.",
+            "location": "gcpwn.modules.gcp.apigateway.exploit.exploit_apigateway_as_sa_oidc"
+          }
+        ]
+      }
+    },
+    {
+      "service": "API Keys",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_apikeys",
+            "info_blurb": "Enumerate API Keys for the selected project (global location).",
+            "location": "gcpwn.modules.gcp.apikeys.enumeration.enum_apikeys"
+          }
+        ],
+        "Unauthenticated": [
+          {
+            "module_name": "unauth_apikey_enum_all_scopes",
+            "info_blurb": "MIT-ported gmapsapiscanner-style module to enumerate unauthenticated Google Maps and related API scope for an exposed Google API key.",
+            "location": "gcpwn.modules.gcp.apikeys.unauthenticated.unauth_apikey_enum_all_scopes",
+            "attribution": [
+              "https://github.com/ozguralp/gmapsapiscanner"
+            ]
+          },
+          {
+            "module_name": "unauth_apikey_gemini_exploit",
+            "info_blurb": "Exploit an exposed Gemini API key by enumerating Gemini files and cached contents, then exercising the token-counting and embeddings REST endpoints.",
+            "location": "gcpwn.modules.gcp.apikeys.unauthenticated.unauth_apikey_gemini_exploit",
+            "attribution": [
+              "https://trufflesecurity.com/blog/google-api-keys-werent-secrets-but-then-gemini-changed-the-rules"
+            ]
+          },
+          {
+            "module_name": "unauth_apikey_vertex_exploit",
+            "info_blurb": "Exploit an exposed Vertex AI express-mode API key by discovering working publisher models and opening an interactive prompt shell.",
+            "location": "gcpwn.modules.gcp.apikeys.unauthenticated.unauth_apikey_vertex_exploit"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Application Integration",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_app_integration_resources",
+            "info_blurb": "Enumerate Application Integration integrations across regions; flags non-default runAsServiceAccount as PE candidates.",
+            "location": "gcpwn.modules.gcp.applicationintegration.enumeration.enum_app_integration_resources"
+          }
+        ],
+        "Exploit": [
+          {
+            "module_name": "exploit_app_integration_as_sa",
+            "info_blurb": "Privilege escalation via Application Integration runAsServiceAccount: create an integration whose GenericRestV2Task delivers TARGET_SA's Bearer token to an attacker-controlled URL. Requires integrations.integrations.create/invoke + iam.serviceAccounts.actAs on TARGET_SA.",
+            "location": "gcpwn.modules.gcp.applicationintegration.exploit.exploit_app_integration_as_sa"
+          }
+        ]
+      }
+    },
+    {
+      "service": "App Engine",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_appengine",
+            "info_blurb": "Enumerate App Engine application, services, versions, and instances.",
+            "location": "gcpwn.modules.gcp.appengine.enumeration.enum_appengine"
+          }
+        ],
+        "Exploit": [
+          {
+            "module_name": "exploit_appengine_version_as_sa",
+            "info_blurb": "PE via App Engine: deploy a new version of an existing App Engine app running as TARGET_SA; the version handler exfils the SA OAuth token via Cloud Logging.",
+            "location": "gcpwn.modules.gcp.appengine.exploit.exploit_appengine_version_as_sa"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Artifact Registry",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_artifactregistry",
+            "info_blurb": "Enumerate Artifact Registry repositories, packages, and versions; child layers use the cache automatically or accept explicit parent flags.",
+            "location": "gcpwn.modules.gcp.artifactregistry.enumeration.enum_artifactregistry"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Batch",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_batch",
+            "info_blurb": "Enumerate Batch jobs.",
+            "location": "gcpwn.modules.gcp.batch.enumeration.enum_batch"
+          }
+        ],
+        "Exploit": [
+          {
+            "module_name": "exploit_batch_job_as_sa",
+            "info_blurb": "PE via Cloud Batch: submit a job with serviceAccount=TARGET_SA; the job queries the GCE metadata server and exfils the OAuth token via Cloud Logging or URL POST.",
+            "location": "gcpwn.modules.gcp.batch.exploit.exploit_batch_job_as_sa"
+          }
+        ]
+      }
+    },
+    {
+      "service": "BigQuery",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_bigquery",
+            "info_blurb": "Enumerate BigQuery datasets and tables, with optional direct targeting by dataset or table ID.",
+            "location": "gcpwn.modules.gcp.bigquery.enumeration.enum_bigquery"
+          }
+        ],
+        "Exploit": [
+          {
+            "module_name": "exploit_bq_spark_procedure_as_sa",
+            "info_blurb": "PE via BigQuery Spark stored procedure: create a routine with serviceAccount=TARGET_SA so the Spark executor runs as TARGET_SA and exfils its OAuth token via the metadata server.",
+            "location": "gcpwn.modules.gcp.bigquery.exploit.exploit_bq_spark_procedure_as_sa"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Bigtable",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_bigtable",
+            "info_blurb": "Enumerate Cloud Bigtable instances, clusters, and tables.",
+            "location": "gcpwn.modules.gcp.bigtable.enumeration.enum_bigtable"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Cloud Build",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_cloudbuild",
+            "info_blurb": "Enumerate Cloud Build triggers, builds, and connections across regions for the selected project.",
+            "location": "gcpwn.modules.gcp.cloudbuild.enumeration.enum_cloudbuild"
+          }
+        ],
+        "Exploit": [
+          {
+            "module_name": "exploit_cloudbuild_build_as_sa",
+            "info_blurb": "Exploit Cloud Build for lateral movement: create new build or (attempt to) update existing build to run arbitrary code as an attached service account. Recovers token via in-project Cloud Logging (secure) or external URL exfil. REQUIRES cloudbuild.builds.create/update + iam.serviceAccounts.actAs on target SA. Note: .update() permission exists in IAM but Cloud Build REST API does not expose the endpoint.",
+            "location": "gcpwn.modules.gcp.cloudbuild.exploit.exploit_cloudbuild_build_as_sa"
+          },
+          {
+            "module_name": "exploit_cloudbuild_trigger_as_sa",
+            "info_blurb": "Privilege escalation via Cloud Build trigger: create a trigger (optionally with a Cloud Source Repository) that runs a build as the target SA, recovering the OAuth2 token via Cloud Logging or URL callback. REQUIRES cloudbuild.triggers.create + iam.serviceAccounts.actAs on target SA.",
+            "location": "gcpwn.modules.gcp.cloudbuild.exploit.exploit_cloudbuild_trigger_as_sa"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Cloud Composer",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_cloudcomposer",
+            "info_blurb": "Enumerate Cloud Composer environments across regions and optionally download software config overrides from retrieved metadata.",
+            "location": "gcpwn.modules.gcp.cloudcomposer.enumeration.enum_cloudcomposer"
+          }
+        ],
+        "Exploit": [
+          {
+            "module_name": "exploit_composer_env_as_sa",
+            "info_blurb": "PE via Cloud Composer: create a Composer environment with nodeConfig.serviceAccount=TARGET_SA so Airflow worker tasks run as TARGET_SA, then exfil the OAuth token via a DAG that queries the metadata server.",
+            "location": "gcpwn.modules.gcp.cloudcomposer.exploit.exploit_composer_env_as_sa"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Cloud DNS",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_clouddns",
+            "info_blurb": "Enumerate Cloud DNS managed zones and record sets. Use --zones and/or --record-sets to control depth; record sets can be filtered by --record-type.",
+            "location": "gcpwn.modules.gcp.clouddns.enumeration.enum_clouddns"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Cloud Functions",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_cloudfunctions",
+            "info_blurb": "Enumerate Cloud Functions with regional scoping, source download, external curl checks, and testIamPermissions.",
+            "location": "gcpwn.modules.gcp.cloudfunctions.enumeration.enum_cloudfunctions"
+          }
+        ],
+        "Exploit": [
+          {
+            "module_name": "exploit_cloudfunctions_function_as_sa",
+            "info_blurb": "Upload or modify function code. Subsequently invoke it to get the OAuth token for an attached service account. Can auto-assume the new identity if desired. Can also be used to standalone call a function.",
+            "location": "gcpwn.modules.gcp.cloudfunctions.exploit.exploit_cloudfunctions_function_as_sa"
+          }
+        ],
+        "Unauthenticated": [
+          {
+            "module_name": "unauth_functionbrute",
+            "info_blurb": "Based on Rhino Security Labs' GCPBucketBrute (https://github.com/RhinoSecurityLabs/GCPBucketBrute); same concept adapted to brute-force Cloud Functions by URL, unauthenticated.",
+            "location": "gcpwn.modules.gcp.cloudfunctions.unauthenticated.unauth_functionbrute"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Cloud KMS",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_kms",
+            "info_blurb": "Enumerate Cloud KMS keyrings/keys/versions across locations (defaults to locations/-). Use --get to fetch per-key metadata.",
+            "location": "gcpwn.modules.gcp.kms.enumeration.enum_kms"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Cloud Run",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_cloudrun",
+            "info_blurb": "Enumerate Cloud Run services and jobs across locations (defaults to locations/-). Use --get to enrich per-resource metadata.",
+            "location": "gcpwn.modules.gcp.cloudrun.enumeration.enum_cloudrun"
+          }
+        ],
+        "Exploit": [
+          {
+            "module_name": "exploit_cloudrun_service_as_sa",
+            "info_blurb": "Deploy Cloud Run service as target SA to extract its OAuth token. Token recovery: --exfil-mode logs (Cloud Logging, in-project) or url (external OAST endpoint). Use --invoke to trigger immediately after deploy. REQUIRES run.services.create + iam.serviceAccounts.actAs on target SA.",
+            "location": "gcpwn.modules.gcp.cloudrun.exploit.exploit_cloudrun_service_as_sa"
+          },
+          {
+            "module_name": "exploit_cloudrun_job_as_sa",
+            "info_blurb": "Deploy Cloud Run job as target SA to extract its OAuth token. Token recovery: --exfil-mode logs (Cloud Logging, in-project) or url (external OAST endpoint). REQUIRES run.jobs.create + iam.serviceAccounts.actAs on target SA.",
+            "location": "gcpwn.modules.gcp.cloudrun.exploit.exploit_cloudrun_job_as_sa"
+          },
+          {
+            "module_name": "exploit_cloudrun_workerpool_as_sa",
+            "info_blurb": "PE via Cloud Run Worker Pool: create a custom worker pool build that runs as the target SA, extracting its OAuth token via logs or URL callback. REQUIRES cloudbuild.workerPools.create + iam.serviceAccounts.actAs on target SA.",
+            "location": "gcpwn.modules.gcp.cloudrun.exploit.exploit_cloudrun_workerpool_as_sa"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Cloud SQL",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_cloudsql",
+            "info_blurb": "Enumerate Cloud SQL instances, cached instance configs, databases, and users using the SQL Admin API.",
+            "location": "gcpwn.modules.gcp.cloudsql.enumeration.enum_cloudsql"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Cloud Storage",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_cloudstorage",
+            "info_blurb": "Enumerate Cloud Storage buckets, blobs, and HMAC keys; use --buckets/--blobs/--hmac-keys to control which resource types are collected.",
+            "location": "gcpwn.modules.gcp.cloudstorage.enumeration.enum_cloudstorage"
+          }
+        ],
+        "Exploit": [
+          {
+            "module_name": "exploit_bucket_action",
+            "info_blurb": "Upload, download, delete, or list objects in a Cloud Storage bucket. Supports both standard service-account and HMAC/XML API modes. Use --action to select the operation.",
+            "location": "gcpwn.modules.gcp.cloudstorage.exploit.exploit_bucket_action"
+          },
+          {
+            "module_name": "exploit_storage_hmac",
+            "info_blurb": "Create a new HMAC Key tied to a service account. Subsequently use this key to try to enumerate/download Cloud Bucket Data using the SigV4 XML API. The module can also activate/deactivate existing keys",
+            "location": "gcpwn.modules.gcp.cloudstorage.exploit.exploit_storage_hmac"
+          }
+        ],
+        "Unauthenticated": [
+          {
+            "module_name": "unauth_bucketbrute",
+            "info_blurb": "A copy of Rhino Security GCP Brute tool. Will brute force GCP buckets given a keyterm and can check for anonymous permissions. Should not leverage credentials to try authenticated permission checks, although that might be added in the future",
+            "location": "gcpwn.modules.gcp.cloudstorage.unauthenticated.unauth_bucketbrute",
+            "attribution": [
+              "https://github.com/RhinoSecurityLabs/GCPBucketBrute"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "service": "Cloud Tasks",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_cloudtasks",
+            "info_blurb": "Enumerate Cloud Tasks queues and tasks across supported locations, with optional HTTP task request sample downloads.",
+            "location": "gcpwn.modules.gcp.cloudtasks.enumeration.enum_cloudtasks"
+          }
+        ],
+        "Exploit": [
+          {
+            "module_name": "exploit_cloudtasks_task_as_sa",
+            "info_blurb": "Privilege escalation via Cloud Tasks: create a queue + HTTP task that runs as the target SA, sending an oidcToken or oauthToken to a callback URL. REQUIRES cloudtasks.queues.create + cloudtasks.tasks.create + iam.serviceAccounts.actAs on target SA.",
+            "location": "gcpwn.modules.gcp.cloudtasks.exploit.exploit_cloudtasks_task_as_sa"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Compute",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_cloudcompute_lb",
+            "info_blurb": "Enumerate Compute Engine load balancing resources including backend buckets/services, forwarding rules, URL maps, and target proxies.",
+            "location": "gcpwn.modules.gcp.cloudcompute.enumeration.enum_cloudcompute_lb"
+          },
+          {
+            "module_name": "enum_cloudcompute_network",
+            "info_blurb": "Enumerate Compute Engine networking resources including VPCs, subnetworks, firewalls, routers/NAT, VPN, attachments, and interconnect surfaces.",
+            "location": "gcpwn.modules.gcp.cloudcompute.enumeration.enum_cloudcompute_network"
+          },
+          {
+            "module_name": "enum_cloudcompute_resources",
+            "info_blurb": "Enumerate Compute Engine resource-plane objects including projects, instances, disks, images, snapshots, machine images, node resources, reservations, and instance groups.",
+            "location": "gcpwn.modules.gcp.cloudcompute.enumeration.enum_cloudcompute_resources"
+          }
+        ],
+        "Exploit": [
+          {
+            "module_name": "exploit_compute_instance_ssh_keys",
+            "info_blurb": "Upload an SSH public key to a Compute Engine instance (compute.instances.setMetadata) or project (compute.projects.setCommonInstanceMetadata) to gain SSH access. Project-level upload affects all instances in the project.",
+            "location": "gcpwn.modules.gcp.cloudcompute.exploit.exploit_compute_instance_ssh_keys"
+          },
+          {
+            "module_name": "exploit_compute_instance_as_sa",
+            "info_blurb": "Compute Engine privilege escalation via startup script injection (--method startup_script: create a new instance or update an existing one via shutdown) or SA swap (--method set_sa: stop, setServiceAccount, start). Startup script exfils the OAuth2 token to a pentester-owned URL; set_sa mode polls Cloud Logging or a URL callback. Requires compute.instances.create or compute.instances.update, iam.serviceAccounts.actAs on target SA.",
+            "location": "gcpwn.modules.gcp.cloudcompute.exploit.exploit_compute_instance_as_sa"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Everything",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_all",
+            "info_blurb": "Call all enumeration modules defined in gcpwn. Can add flags like --iam to do all IAM testIamPermissions checks and --all-permissions to do ~9000 permission checks at the project/folder/org level. Can also add the --download flag to try to do a mass download while enumerating. With --parallel-services it also runs the Google Workspace phase once at the end.",
+            "location": "gcpwn.modules.everything.enumeration.enum_all"
+          },
+          {
+            "module_name": "enum_gcp",
+            "info_blurb": "GCP-only enumeration: identical to enum_all but without the trailing Google Workspace phase. Same parallel orchestrator + flags.",
+            "location": "gcpwn.modules.everything.enumeration.enum_gcp"
+          },
+          {
+            "module_name": "enum_gcp_policy_bindings",
+            "info_blurb": "Enumerate IAM policy bindings across already-enumerated resources (org/folder/project plus service resources). Uses Cloud Asset Inventory when available and falls back to per-service APIs for key services (Storage/BigQuery/Compute/Functions/Secrets/KMS/Run/PubSub/Spanner/Service Directory/Cloud Tasks/Artifact Registry).",
+            "location": "gcpwn.modules.everything.enumeration.enum_gcp_policy_bindings"
+          }
+        ],
+        "Exploit": [
+          {
+            "module_name": "exploit_gcp_setiampolicy",
+            "info_blurb": "Unified SetIamPolicy helper. Prompts for the service/resource (or accepts flags) and adds a binding for a given member+role (defaults to session email + a service-appropriate admin role). Supports Resource Manager, Storage, Compute, Functions, Secrets, Cloud Run, Artifact Registry, KMS, Pub/Sub, Spanner, Service Directory, and Cloud Tasks.",
+            "location": "gcpwn.modules.everything.exploit.exploit_gcp_setiampolicy"
+          },
+          {
+            "module_name": "exploit_gcp_updatepolicybinding",
+            "info_blurb": "Exploit GCP Principal Access Boundary (PAB) policy binding manipulation. Actions: list (enumerate existing PAB bindings), delete (remove a restrictive binding to unleash a high-priv SA), update (swap the binding's PAB policy reference to a permissive one), create (add a new permissive PAB binding that bypasses restrictive ones via union semantics). Requires resourcemanager.{projects|folders|organizations}.{create|update|delete}PolicyBinding. Use --service project|folder|org and --action list|delete|update|create.",
+            "location": "gcpwn.modules.everything.exploit.exploit_gcp_updatepolicybinding"
+          }
+        ],
+        "Processing": [
+          {
+            "module_name": "process_gcp_iam_bindings",
+            "info_blurb": "Review org-wide security issues that might arise mainly with roles/permissions. Export the data to a csv or txt with --csv or --txt respectively. Note this will handle both convenience and custom roles in addition to normal predefined GCP roles, but not constraints or anything more advanced.",
+            "location": "gcpwn.modules.everything.process.process_gcp_iam_bindings"
+          },
+          {
+            "module_name": "process_scope_creator",
+            "info_blurb": "Extract all external-facing URLs and IPs across the workspace DB (Cloud Run, Cloud Functions, App Engine, GKE, Cloud SQL, Compute external IPs, LB rules, AlloyDB, API Gateway, Data Fusion, Managed Kafka, Cloud Shell, Workstations, Service Directory, VPN peers, NAT IPs, Memorystore, Cloud DNS). Outputs scope_creator.csv (resource_type, resource_id, url_or_ip, is_public, dns columns) and dangling_dns.csv (A/CNAME records pointing to IPs not found anywhere else in the org DB). Use --output to set the output directory.",
+            "location": "gcpwn.modules.everything.process.process_scope_creator"
+          },
+          {
+            "module_name": "process_download",
+            "info_blurb": "Download content for already-enumerated GCP resources from the workspace DB. Same token vocabulary as enum_all --download (all/metadata/content or individual tokens: secrets, function_env, cloudrun_revision_env, batch_scripts, apikeys_content, datastream_connection_profiles, clouddomains_contacts, buckets, function_source, bigquery_tables, compute_serial, compute_screenshot, compute_user_data, artifactregistry_files, cloudbuild_builds, cloudtasks_requests, composer_configs, clouddns_record_sets, firestore_data). Use --projects to restrict to specific project IDs.",
+            "location": "gcpwn.modules.everything.process.process_download"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Firestore",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_firestore",
+            "info_blurb": "Enumerate Firestore databases via the Firestore Admin API.",
+            "location": "gcpwn.modules.gcp.firestore.enumeration.enum_firestore"
+          }
+        ]
+      }
+    },
+    {
+      "service": "GKE",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_gke",
+            "info_blurb": "Enumerate GKE clusters across locations (defaults to locations/-). Use --get to fetch per-cluster metadata.",
+            "location": "gcpwn.modules.gcp.gke.enumeration.enum_gke"
+          }
+        ],
+        "Exploit": [
+          {
+            "module_name": "exploit_gke_cluster_sa",
+            "info_blurb": "PE via GKE: steal SA token from pod metadata server (container.pods.create) or impersonate system:masters group (container.clusters.impersonate) to gain cluster-admin.",
+            "location": "gcpwn.modules.gcp.gke.exploit.exploit_gke_cluster_sa"
+          }
+        ]
+      }
+    },
+    {
+      "service": "GKE Hub",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_gkehub",
+            "info_blurb": "Enumerate GKE Hub (Fleet) resources: memberships (enrolled clusters), scopes, and RBAC role bindings.",
+            "location": "gcpwn.modules.gcp.gkehub.enumeration.enum_gkehub"
+          }
+        ],
+        "Exploit": [
+          {
+            "module_name": "exploit_gkehub_gateway_as_sa",
+            "info_blurb": "PE via GKE Hub Connect Gateway: POST/PUT/PATCH K8s resources to a fleet-enrolled cluster via the Connect Gateway; created pods read the metadata server to steal the cluster SA OAuth token.",
+            "location": "gcpwn.modules.gcp.gkehub.exploit.exploit_gkehub_gateway_as_sa"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Google Workspace",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_cloud_identity",
+            "info_blurb": "Enumerate Google Workspace / Cloud Identity groups and memberships. Uses directory customer ID (directoryCustomerId) where available.",
+            "location": "gcpwn.modules.workspace.cloud_identity.enumeration.enum_cloud_identity"
+          },
+          {
+            "module_name": "enum_google_workspace",
+            "info_blurb": "Run all Google Workspace / Cloud Identity enumerators once (tenant-scoped). Needs Workspace admin creds or service-account domain-wide delegation (--impersonate / configs set workspace_admin_subject admin@domain).",
+            "location": "gcpwn.modules.everything.enumeration.enum_google_workspace"
+          },
+          {
+            "module_name": "enum_admin_roles",
+            "info_blurb": "Enumerate Google Workspace admin roles + role assignments (Admin SDK Directory API, read-only). Flags super-admin/system roles and maps who holds each privileged role (highest attack-path value). Customer-scoped; needs Workspace admin creds or SA domain-wide delegation (--impersonate / configs set workspace_admin_subject admin@domain).",
+            "location": "gcpwn.modules.workspace.directory.enumeration.enum_admin_roles"
+          },
+          {
+            "module_name": "enum_org_units",
+            "info_blurb": "Enumerate Google Workspace organizational units (Admin SDK Directory API orgunits.list). Customer-scoped; needs Workspace admin creds or SA domain-wide delegation (--impersonate / configs set workspace_admin_subject).",
+            "location": "gcpwn.modules.workspace.directory.enumeration.enum_org_units"
+          },
+          {
+            "module_name": "enum_domains",
+            "info_blurb": "Enumerate Google Workspace domains (Admin SDK Directory API domains.list). Customer-scoped; needs Workspace admin creds or SA domain-wide delegation (--impersonate / configs set workspace_admin_subject).",
+            "location": "gcpwn.modules.workspace.directory.enumeration.enum_domains"
+          },
+          {
+            "module_name": "enum_mobile_devices",
+            "info_blurb": "Enumerate Google Workspace mobile devices (Admin SDK Directory API mobiledevices.list). Customer-scoped; needs Workspace admin creds or SA domain-wide delegation (--impersonate / configs set workspace_admin_subject).",
+            "location": "gcpwn.modules.workspace.directory.enumeration.enum_mobile_devices"
+          },
+          {
+            "module_name": "enum_oauth_tokens",
+            "info_blurb": "Enumerate Google Workspace 3rd-party OAuth app grants per user (Admin SDK Directory API tokens.list). Surfaces over-privileged app authorizations. Scans cached workspace_users (run enum_cloud_identity --users first) or a single --user-key; needs Workspace admin creds or SA domain-wide delegation.",
+            "location": "gcpwn.modules.workspace.directory.enumeration.enum_oauth_tokens"
+          },
+          {
+            "module_name": "enum_group_settings",
+            "info_blurb": "Read each Google Workspace group's access/posting settings (Groups Settings API groups.get). Flags externally-open / anyone-can-post / anyone-can-join groups. Scans cached workspace_groups (run enum_cloud_identity --groups first) or a single --group-email; needs Workspace admin creds or SA domain-wide delegation (scope apps.groups.settings).",
+            "location": "gcpwn.modules.workspace.groups_settings.enumeration.enum_group_settings"
+          },
+          {
+            "module_name": "enum_data_transfers",
+            "info_blurb": "Enumerate Google Workspace data-ownership transfer requests (Admin SDK Data Transfer API transfers.list). Surfaces offboarding data movement (old owner -> new owner, per application, status). Customer-scoped; needs Workspace admin creds or SA domain-wide delegation (scope admin.datatransfer.readonly).",
+            "location": "gcpwn.modules.workspace.data_transfer.enumeration.enum_data_transfers"
+          },
+          {
+            "module_name": "enum_drive",
+            "info_blurb": "Enumerate a Google Drive's files and sharing (ACL) exposure, and optionally download file CONTENT (a modern, logged GD-Thief). Lists one user's Drive at a time (--caller-email = SA domain-wide-delegation subject), sweeps all cached users (--all-users), or reads the current user's own Drive; flags public / anyone-with-link / external / domain files into workspace_drive_files + workspace_drive_permissions. --download-public pulls only public files; --download pulls all candidates (tiers: --focused by name/type, --secret-regex scans CONTENT). Download AS a different stored credential with --downloader-cred, or try EVERY stored credential per file with --downloader-creds-all. Emits greppable [DOWNLOAD] logs; --throttle paces requests. Needs the drive.readonly scope + Drive API enabled.",
+            "location": "gcpwn.modules.workspace.apps.drive.enumeration.enum_drive"
+          }
+        ]
+      }
+    },
+    {
+      "service": "IAM",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_iam",
+            "info_blurb": "Enumerate IAM service accounts, custom roles, policy bindings, and Workload Identity pools/providers/service-account IAM policies.",
+            "location": "gcpwn.modules.gcp.iam.enumeration.enum_iam"
+          }
+        ],
+        "Exploit": [
+          {
+            "module_name": "exploit_generate_access_token",
+            "info_blurb": "Generate an access token for a service account and assume it within GCPwn (--assume) to pivot to a different user. Note this also handles implicit delegation with the --delegation flag relying on you to either supply the role chain or checking whats been enumerated thus far to help you build the delegation chain.",
+            "location": "gcpwn.modules.gcp.iam.exploit.exploit_generate_access_token"
+          },
+          {
+            "module_name": "exploit_service_account_keys",
+            "info_blurb": "Generate an account key for a service account and assume it within GCPwn (--assume) to pivot to a different user. Note unlike the access token which usually lasts for around 1 hour, a service key can last for much longer and is a much more permanent pivot.",
+            "location": "gcpwn.modules.gcp.iam.exploit.exploit_service_account_keys"
+          },
+          {
+            "module_name": "exploit_get_oidc_token",
+            "info_blurb": "Generate a Google-signed OIDC token (ID token) for a service account using iam.serviceAccounts.getOpenIdToken. The token is audience-specific and can be used with WIF exchange.",
+            "location": "gcpwn.modules.gcp.iam.exploit.exploit_get_oidc_token"
+          },
+          {
+            "module_name": "exploit_sign_jwt_as_sa",
+            "info_blurb": "Sign a JWT as a service account using signJwt or signBlob, then exchange for an OAuth2 access token. Requires iam.serviceAccounts.signJwt or iam.serviceAccounts.signBlob.",
+            "location": "gcpwn.modules.gcp.iam.exploit.exploit_sign_jwt_as_sa"
+          },
+          {
+            "module_name": "exploit_wif_impersonation",
+            "info_blurb": "Privilege escalation via Workload Identity Federation: create a WIF pool + provider, bind to a target SA, and exchange an external token for a federated GCP access token. Supports Google/GitHub/GitLab/AWS/custom identity providers.",
+            "location": "gcpwn.modules.gcp.iam.exploit.exploit_wif_impersonation"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Integration Connectors",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_integration_connectors",
+            "info_blurb": "Enumerate Integration Connector connections across regions; records connector type, state, and service account per connection.",
+            "location": "gcpwn.modules.gcp.integration_connectors.enumeration.enum_integration_connectors"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Memorystore",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_memorystore",
+            "info_blurb": "Enumerate Memorystore for Redis instances and clusters (distinct redis and redis_cluster APIs).",
+            "location": "gcpwn.modules.gcp.memorystore.enumeration.enum_memorystore"
+          }
+        ]
+      }
+    },
+    {
+      "service": "OpenGraph",
+      "categories": {
+        "Processing": [
+          {
+            "module_name": "process_og_gcpwn_data",
+            "info_blurb": "Build OpenGraph data from cached workspace tables and export BloodHound-compatible JSON output.",
+            "location": "gcpwn.modules.opengraph.processing.process_og_gcpwn_data"
+          },
+          {
+            "module_name": "process_og_node_color_images",
+            "info_blurb": "Sync OpenGraph custom node color/image metadata to a BloodHound custom-node endpoint.",
+            "location": "gcpwn.modules.opengraph.processing.process_og_node_color_images"
+          },
+          {
+            "module_name": "process_og_attack_paths",
+            "info_blurb": "PMapper-style text attack-path analysis over an exported OpenGraph JSON graph -- no BloodHound UI needed. Answers 'who can reach roles/owner', 'who can reach this service account', or 'who can reach resources at this project/folder/org', shortest path first. Defaults to roles/owner + roles/editor. Use --list-targets/--stats to explore, --all-paths for full enumeration, --json for machine-readable output.",
+            "location": "gcpwn.modules.opengraph.processing.process_og_attack_paths"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Pub/Sub",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_pubsub",
+            "info_blurb": "Enumerate Pub/Sub topics, subscriptions, schemas, and snapshots, with optional direct targeting by full resource name.",
+            "location": "gcpwn.modules.gcp.pubsub.enumeration.enum_pubsub"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Resource Manager",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_resources",
+            "info_blurb": "Enumerate projects/folders/organizations. Pass --iam to run testIamPermissions on each resource. Adding --all-permissions enumerates ~9000 individual permissions in batches and is the most comprehensive.",
+            "location": "gcpwn.modules.gcp.resourcemanager.enumeration.enum_resources"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Secrets",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_secretsmanager",
+            "info_blurb": "Enumerate Secret Manager secrets, versions, and secret values; use --secrets/--versions/--values to control depth.",
+            "location": "gcpwn.modules.gcp.secretsmanager.enumeration.enum_secretsmanager"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Service Directory",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_servicedirectory",
+            "info_blurb": "Enumerate Service Directory namespaces, services, and endpoints across regions (defaults to locations/-).",
+            "location": "gcpwn.modules.gcp.servicedirectory.enumeration.enum_servicedirectory"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Storage Transfer",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_storagetransfer",
+            "info_blurb": "Enumerate Storage Transfer Service transfer jobs.",
+            "location": "gcpwn.modules.gcp.storagetransfer.enumeration.enum_storagetransfer"
+          }
+        ]
+      }
+    },
+    {
+      "service": "AgentPlatform",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_agentplatform",
+            "info_blurb": "Enumerate AgentPlatform (aiplatform) datasets, endpoints, models, featurestores, entity types, feature groups, feature online stores, feature views, reasoning engines, and notebook runtime templates.",
+            "location": "gcpwn.modules.gcp.agentplatform.enumeration.enum_agentplatform"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Cloud Scheduler",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_cloudscheduler",
+            "info_blurb": "Enumerate Cloud Scheduler jobs (schedule, target type/URI, and the service account a job impersonates) across supported locations.",
+            "location": "gcpwn.modules.gcp.cloudscheduler.enumeration.enum_cloudscheduler"
+          }
+        ],
+        "Exploit": [
+          {
+            "module_name": "exploit_cloudscheduler_job",
+            "info_blurb": "Create Cloud Scheduler job to invoke Google APIs as target SA (cloudscheduler.jobs.create + iam.serviceAccounts.actAs). Pre-packaged payloads: generateAccessToken, createServiceAccountKey (backdoor), makeAdmin (privilege escalation), listSecrets, readSecret, or custom API calls.",
+            "location": "gcpwn.modules.gcp.cloudscheduler.exploit.exploit_cloudscheduler_job"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Cloud Workflows",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_cloudworkflows",
+            "info_blurb": "Enumerate Cloud Workflows workflows (state, revision, and the service account each workflow runs as -- a priv-esc signal) across supported locations.",
+            "location": "gcpwn.modules.gcp.cloudworkflows.enumeration.enum_cloudworkflows"
+          }
+        ],
+        "Exploit": [
+          {
+            "module_name": "exploit_cloudworkflows_execution_as_sa",
+            "info_blurb": "Privilege escalation via Cloud Workflows: create a workflow that issues an HTTP request as the target SA (service-agent bypass \u2014 no personal actAs needed), exfiling the Bearer token to a callback URL or Cloud Logging. REQUIRES workflows.workflows.create + workflows.executions.create.",
+            "location": "gcpwn.modules.gcp.cloudworkflows.exploit.exploit_cloudworkflows_execution_as_sa"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Cloud Spanner",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_spanner",
+            "info_blurb": "Enumerate Cloud Spanner instances (project-scoped) and databases (nested per instance) via the spanner_admin_instance_v1 / spanner_admin_database_v1 GAPIC clients. Supports --get hydration and --iam (testIamPermissions on instances and databases). Captures instance config/placement and database drop-protection/default-leader for blast-radius context.",
+            "location": "gcpwn.modules.gcp.spanner.enumeration.enum_spanner"
+          }
+        ]
+      }
+    },
+    {
+      "service": "AlloyDB",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_alloydb",
+            "info_blurb": "Enumerate AlloyDB clusters (state, type, database version, VPC network, CMEK kms_key_name, initial user) and their per-cluster instances (type, availability, zone, private/public IP) across supported locations.",
+            "location": "gcpwn.modules.gcp.alloydb.enumeration.enum_alloydb"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Organization Policy",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_orgpolicy",
+            "info_blurb": "Enumerate Organization Policy constraints (org policies) set on a project via the orgpolicy_v2 GAPIC OrgPolicyClient. Surfaces which guardrails are active (e.g. iam.disableServiceAccountKeyCreation enforced) so an operator can see which attack paths are blocked; captures a compact enforced/allow/deny rule summary per constraint.",
+            "location": "gcpwn.modules.gcp.orgpolicy.enumeration.enum_orgpolicy"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Cloud Asset Inventory",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_asset_inventory",
+            "info_blurb": "Pull resources + IAM policies org/folder/project-wide via Cloud Asset Inventory and populate the shared workspace tables (force-multiplier + fallback). Opt-in in enum_all via --asset-inventory.",
+            "location": "gcpwn.modules.gcp.assetinventory.enumeration.enum_asset_inventory"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Eventarc",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_eventarc",
+            "info_blurb": "Enumerate Eventarc triggers (destination type/target, channel, event-filter summary, and the SA a trigger invokes its destination as) across supported locations.",
+            "location": "gcpwn.modules.gcp.eventarc.enumeration.enum_eventarc"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Cloud Workstations",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_workstations",
+            "info_blurb": "Enumerate Cloud Workstations clusters, configs (incl. the SA each workstation runs as) and workstations (state/host) across supported locations.",
+            "location": "gcpwn.modules.gcp.workstations.enumeration.enum_workstations"
+          }
+        ],
+        "Exploit": [
+          {
+            "module_name": "exploit_workstation_as_sa",
+            "info_blurb": "Privilege escalation via Cloud Workstations: create a workstation config + workstation running as the target SA; extract its OAuth2 token via container boot startup or Cloud Logging. REQUIRES workstations.workstationConfigs.create + workstations.workstations.create + iam.serviceAccounts.actAs on target SA.",
+            "location": "gcpwn.modules.gcp.workstations.exploit.exploit_workstation_as_sa"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Cloud Filestore",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_filestore",
+            "info_blurb": "Enumerate Cloud Filestore instances, snapshots, and backups across supported locations.",
+            "location": "gcpwn.modules.gcp.filestore.enumeration.enum_filestore"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Cloud Billing",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_billing",
+            "info_blurb": "Enumerate billing accounts (+ best-effort admin IAM members) and the current project's billing link/status.",
+            "location": "gcpwn.modules.gcp.billing.enumeration.enum_billing"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Cloud Shell",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_cloudshell",
+            "info_blurb": "Fetch the caller's Cloud Shell environment (authorized SSH public keys, custom docker image, ssh/web hosts).",
+            "location": "gcpwn.modules.gcp.cloudshell.enumeration.enum_cloudshell"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Cloud Logging",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_logging",
+            "info_blurb": "List Cloud Logging sinks (export destinations + writer SA), buckets, log names and metrics; --download fetches recent entries capped per log.",
+            "location": "gcpwn.modules.gcp.logging.enumeration.enum_logging"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Dataproc",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_dataproc",
+            "info_blurb": "Enumerate Dataproc clusters and Serverless batches across regions, including the service account each runs as (dataproc.jobs.create / batches.create code-exec-as-SA).",
+            "location": "gcpwn.modules.gcp.dataproc.enumeration.enum_dataproc"
+          }
+        ],
+        "Exploit": [
+          {
+            "module_name": "exploit_dataproc_batch_as_sa",
+            "info_blurb": "PE via Dataproc Serverless: submit a PySpark batch with executionConfig.serviceAccount=TARGET_SA; the batch queries the metadata server and exfils the OAuth token via GCS driveroutput.",
+            "location": "gcpwn.modules.gcp.dataproc.exploit.exploit_dataproc_batch_as_sa"
+          },
+          {
+            "module_name": "exploit_dataproc_workflow_template_as_sa",
+            "info_blurb": "PE via Dataproc Workflow Template: create and instantiate a workflow template with gceClusterConfig.serviceAccount=TARGET_SA; the PySpark job exfils the OAuth token to GCS.",
+            "location": "gcpwn.modules.gcp.dataproc.exploit.exploit_dataproc_workflow_template_as_sa"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Dataflow",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_dataflow_core",
+            "info_blurb": "Enumerate Dataflow jobs across regions, including the worker service account each runs as (Flex Template code-exec-as-SA / data exfil).",
+            "location": "gcpwn.modules.gcp.dataflow.enumeration.enum_dataflow_core"
+          },
+          {
+            "module_name": "enum_dataflow_datapipelines",
+            "info_blurb": "Enumerate Dataflow Data Pipelines (scheduled / streaming pipeline configs).",
+            "location": "gcpwn.modules.gcp.dataflow.enumeration.enum_dataflow_datapipelines"
+          }
+        ],
+        "Exploit": [
+          {
+            "module_name": "exploit_dataflow_job_as_sa",
+            "info_blurb": "Privilege escalation via Dataflow Flex Template job: create a job running as the target SA, extracting its OAuth2 token via Cloud Logging or URL callback. REQUIRES dataflow.jobs.create + iam.serviceAccounts.actAs on target SA.",
+            "location": "gcpwn.modules.gcp.dataflow.exploit.exploit_dataflow_job_as_sa"
+          },
+          {
+            "module_name": "exploit_dataflow_datapipeline_as_sa",
+            "info_blurb": "Privilege escalation via Dataflow Data Pipeline: create a pipeline running as the target SA, extracting its OAuth2 token via Cloud Logging or URL callback. REQUIRES dataflow.dataPipelines.create + iam.serviceAccounts.actAs on target SA.",
+            "location": "gcpwn.modules.gcp.dataflow.exploit.exploit_dataflow_datapipeline_as_sa"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Vertex AI Workbench",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_notebooks",
+            "info_blurb": "Enumerate Vertex AI Workbench instances (notebooks_v2) across regions; extracts the gce_setup service-account run-as identity and proxy URI. Supports --get and testIamPermissions.",
+            "location": "gcpwn.modules.gcp.notebooks.enumeration.enum_notebooks"
+          }
+        ],
+        "Exploit": [
+          {
+            "module_name": "exploit_workbench_instance_as_sa",
+            "info_blurb": "Privilege escalation via Vertex AI Workbench: create a Workbench instance (GCE VM) running as the target SA, extracting its OAuth2 token via startup script URL callback or Cloud Logging. REQUIRES notebooks.instances.create + iam.serviceAccounts.actAs on target SA.",
+            "location": "gcpwn.modules.gcp.notebooks.exploit.exploit_workbench_instance_as_sa"
+          },
+          {
+            "module_name": "exploit_notebooks_execution_as_sa",
+            "info_blurb": "Privilege escalation via Vertex AI Workbench Executions (v1 API): create a notebook execution (Vertex AI Custom Training) running as the target SA, extracting its OAuth2 token via URL callback or GCS notebook output. REQUIRES notebooks.executions.create + iam.serviceAccounts.actAs on target SA.",
+            "location": "gcpwn.modules.gcp.notebooks.exploit.exploit_notebooks_execution_as_sa"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Cloud Deploy",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_clouddeploy",
+            "info_blurb": "Enumerate Cloud Deploy delivery pipelines and targets across regions, including each target's deploy runtime type and the service account rollouts run as. Supports --get and testIamPermissions.",
+            "location": "gcpwn.modules.gcp.clouddeploy.enumeration.enum_clouddeploy"
+          }
+        ],
+        "Exploit": [
+          {
+            "module_name": "exploit_clouddeploy_target_as_sa",
+            "info_blurb": "Privilege escalation via Cloud Deploy: create a delivery pipeline + target pinned to TARGET_SA, upload a Skaffold archive with a token-exfil deploy hook, and recover the SA OAuth2 token via Cloud Logging or external URL. The deploy hook exits 1 so no Cloud Run service is actually created. REQUIRES clouddeploy.{deliveryPipelines,targets,releases,rollouts}.create + iam.serviceAccounts.actAs on TARGET_SA.",
+            "location": "gcpwn.modules.gcp.clouddeploy.exploit.exploit_clouddeploy_target_as_sa"
+          }
+        ]
+      }
+    },
+    {
+      "service": "BigQuery Data Transfer",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_bigquerydatatransfer",
+            "info_blurb": "Enumerate BigQuery Data Transfer Service transfer configs (data_source_id, destination dataset, schedule, owner) across regions.",
+            "location": "gcpwn.modules.gcp.bigquerydatatransfer.enumeration.enum_bigquerydatatransfer"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Service Usage",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_serviceusage",
+            "info_blurb": "Enumerate the APIs (services) enabled on a project (serviceusage.services.list, state:ENABLED) -- the enabled-API attack surface and which other enum modules can return data.",
+            "location": "gcpwn.modules.gcp.serviceusage.enumeration.enum_serviceusage"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Deployment Manager",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_deploymentmanager",
+            "info_blurb": "Enumerate Deployment Manager deployments including manifest, resources, service account, and operation status.",
+            "location": "gcpwn.modules.gcp.deploymentmanager.enumeration.enum_deploymentmanager"
+          }
+        ],
+        "Exploit": [
+          {
+            "module_name": "exploit_deploymentmanager_vm_as_sa",
+            "info_blurb": "PE via Deployment Manager: deploy a GCE VM template with SERVICE_ACCOUNT=TARGET_SA; the startup script queries the metadata server and exfils the OAuth token via Cloud Logging.",
+            "location": "gcpwn.modules.gcp.deploymentmanager.exploit.exploit_deploymentmanager_vm_as_sa"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Firebase",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_firebase",
+            "info_blurb": "Enumerate Firebase App Hosting backends including build settings, pinned release, traffic split, and the Cloud Run service URL.",
+            "location": "gcpwn.modules.gcp.firebase.enumeration.enum_firebase"
+          }
+        ],
+        "Exploit": [
+          {
+            "module_name": "exploit_firebase_app_hosting_backend_as_sa",
+            "info_blurb": "PE via Firebase App Hosting: create or update a backend with serviceAccount=TARGET_SA; the deployed Cloud Run revision queries the metadata server and exfils the OAuth token via Cloud Logging.",
+            "location": "gcpwn.modules.gcp.firebase.exploit.exploit_firebase_app_hosting_backend_as_sa"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Identity-Aware Proxy",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_iap",
+            "info_blurb": "Enumerate GCE instances accessible via IAP TCP tunnel, checking firewall rules for IAP-specific allow rules (35.235.240.0/20).",
+            "location": "gcpwn.modules.gcp.iap.enumeration.enum_iap"
+          }
+        ],
+        "Exploit": [
+          {
+            "module_name": "exploit_iap_tunnel_vm_sa",
+            "info_blurb": "PE via IAP TCP tunnel: open an IAP tunnel to a GCE VM and run a command (e.g. curl metadata server) to recover the VM's service account OAuth token.",
+            "location": "gcpwn.modules.gcp.iap.exploit.exploit_iap_tunnel_vm_sa"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Cloud TPU",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_tpu",
+            "info_blurb": "Enumerate Cloud TPU nodes and the service account each node runs as.",
+            "location": "gcpwn.modules.gcp.tpu.enumeration.enum_tpu"
+          }
+        ],
+        "Exploit": [
+          {
+            "module_name": "exploit_tpu_node_as_sa",
+            "info_blurb": "PE via Cloud TPU: create a TPU node with serviceAccount=TARGET_SA; the node's GCE metadata server exposes the target SA token, exfilled via startup-script POST or GCS write.",
+            "location": "gcpwn.modules.gcp.tpu.exploit.exploit_tpu_node_as_sa"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Vertex AI",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_vertex",
+            "info_blurb": "Enumerate Vertex AI resources (custom jobs, pipeline jobs, deployment resource pools, tuning jobs, reasoning engines, endpoints, models) and the service accounts they run as.",
+            "location": "gcpwn.modules.gcp.vertex.enumeration.enum_vertex"
+          }
+        ],
+        "Exploit": [
+          {
+            "module_name": "exploit_vertex_custom_job_as_sa",
+            "info_blurb": "Privilege escalation via Vertex AI Custom Job: Vertex service agent (Cat 2 bypass) runs the job as target SA; token exfil via GCS blob or URL callback. REQUIRES aiplatform.customJobs.create; Vertex service agent must have tokenCreator on target SA.",
+            "location": "gcpwn.modules.gcp.vertex.exploit.exploit_vertex_custom_job_as_sa"
+          },
+          {
+            "module_name": "exploit_vertex_pipeline_job_as_sa",
+            "info_blurb": "Privilege escalation via Vertex AI Pipeline Job: Vertex service agent (Cat 2 bypass) runs the KFP v2 inline pipeline as target SA; token exfil via URL callback. REQUIRES aiplatform.pipelineJobs.create; Vertex service agent must have tokenCreator on target SA.",
+            "location": "gcpwn.modules.gcp.vertex.exploit.exploit_vertex_pipeline_job_as_sa"
+          },
+          {
+            "module_name": "exploit_vertex_endpoint_as_sa",
+            "info_blurb": "Privilege escalation via Vertex AI Endpoint: deploy an endpoint + model running as target SA; token exfil via URL callback, GCS, or Cloud Logging. REQUIRES aiplatform.endpoints.create + deploy + iam.serviceAccounts.actAs on target SA.",
+            "location": "gcpwn.modules.gcp.vertex.exploit.exploit_vertex_endpoint_as_sa"
+          },
+          {
+            "module_name": "exploit_vertex_reasoning_engine_as_sa",
+            "info_blurb": "Privilege escalation via Vertex AI Reasoning Engine: create or patch a reasoning engine running as target SA; token exfil via URL callback on platform initialization. REQUIRES aiplatform.reasoningEngines.create + iam.serviceAccounts.actAs on target SA.",
+            "location": "gcpwn.modules.gcp.vertex.exploit.exploit_vertex_reasoning_engine_as_sa"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Infrastructure Manager",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_inframanager",
+            "info_blurb": "Enumerate Infrastructure Manager (Config Controller) deployments including the deployment service account and source GCS URI.",
+            "location": "gcpwn.modules.gcp.inframanager.enumeration.enum_inframanager"
+          }
+        ],
+        "Exploit": [
+          {
+            "module_name": "exploit_inframanager_deployment_as_sa",
+            "info_blurb": "Privilege escalation via Infrastructure Manager: stage a Terraform null_resource module in GCS that exfils the target SA token via HTTP POST. REQUIRES config.deployments.create + iam.serviceAccounts.actAs on target SA.",
+            "location": "gcpwn.modules.gcp.inframanager.exploit.exploit_inframanager_deployment_as_sa"
+          }
+        ]
+      }
+    },
+    {
+      "service": "VM Migration",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_vmmigration_resources",
+            "info_blurb": "Enumerate VM Migration (Migrate to Virtual Machines) sources, migrating VMs, migration groups, and target projects.",
+            "location": "gcpwn.modules.gcp.vmmigration.enumeration.enum_vmmigration_resources"
+          }
+        ],
+        "Exploit": [
+          {
+            "module_name": "exploit_vmmigration_image_import_as_sa",
+            "info_blurb": "Privilege escalation via VM Migration ImageImport: create an image import targeting a SA-attached GCE VM (Cat 1 bypass \u2014 no personal actAs required). Use --api-confirm-only for a no-resource HTTP-404 bypass proof, or full exploit to launch the VM and query IMDS.",
+            "location": "gcpwn.modules.gcp.vmmigration.exploit.exploit_vmmigration_image_import_as_sa"
+          },
+          {
+            "module_name": "exploit_vmmigration_migrating_vm_as_sa",
+            "info_blurb": "Privilege escalation via VM Migration MigratingVm: create a migration source + migrating VM entry for a SA-attached instance (Cat 1 bypass \u2014 no personal actAs indicated). Use --api-confirm-only for HTTP-400 bypass proof, or full exploit to launch the migrated VM.",
+            "location": "gcpwn.modules.gcp.vmmigration.exploit.exploit_vmmigration_migrating_vm_as_sa"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Dataform",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_dataform",
+            "info_blurb": "Enumerate Dataform repositories (git remotes, service accounts), workspaces, release configs, and workflow configs (invocation service account).",
+            "location": "gcpwn.modules.gcp.dataform.enumeration.enum_dataform"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Dataplex",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_dataplex",
+            "info_blurb": "Enumerate Dataplex / Knowledge Catalog resources: lakes, zones, assets, data scans, and governance entries.",
+            "location": "gcpwn.modules.gcp.dataplex.enumeration.enum_dataplex"
+          }
+        ],
+        "Exploit": [
+          {
+            "module_name": "exploit_dataplex_task_as_sa",
+            "info_blurb": "Privilege escalation via Dataplex Spark Task: create a Dataplex lake + Spark task running as the target SA, extracting its OAuth2 token via staging bucket, GCS exfil bucket, or URL callback. REQUIRES dataplex.tasks.create + iam.serviceAccounts.actAs on target SA.",
+            "location": "gcpwn.modules.gcp.dataplex.exploit.exploit_dataplex_task_as_sa"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Cloud Data Fusion",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_datafusion_resources",
+            "info_blurb": "Enumerate Cloud Data Fusion instances including the Dataproc service account, service endpoint, and API endpoint.",
+            "location": "gcpwn.modules.gcp.clouddatafusion.enumeration.enum_datafusion_resources"
+          }
+        ],
+        "Exploit": [
+          {
+            "module_name": "exploit_datafusion_instance_as_sa",
+            "info_blurb": "Privilege escalation via Cloud Data Fusion: create a CDAP pipeline that reads IMDS and POSTs the target SA token to a callback URL. REQUIRES datafusion.instances.create + iam.serviceAccounts.actAs on target SA. Note: instance creation takes 45-90 minutes.",
+            "location": "gcpwn.modules.gcp.clouddatafusion.exploit.exploit_datafusion_instance_as_sa"
+          }
+        ]
+      }
+    },
+    {
+      "service": "VMware Engine",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_vmwareengine",
+            "info_blurb": "Enumerate VMware Engine private clouds and clusters. Exposes NSX/vCenter FQDNs required for READ_VMWARE_NSX_CREDENTIALS and READ_VMWARE_VCENTER_CREDENTIALS SRA edges.",
+            "location": "gcpwn.modules.gcp.vmwareengine.enumeration.enum_vmwareengine"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Oracle Database",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_oracledatabase",
+            "info_blurb": "Enumerate Oracle Autonomous Databases, Exadata Infrastructures, and Cloud VM Clusters. Exposes resources needed for GENERATE_ORACLE_AUTONOMOUS_DB_WALLET SRA edge.",
+            "location": "gcpwn.modules.gcp.oracledatabase.enumeration.enum_oracledatabase"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Managed Kafka",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_managedkafka",
+            "info_blurb": "Enumerate Managed Apache Kafka clusters, topics, and consumer groups.",
+            "location": "gcpwn.modules.gcp.managedkafka.enumeration.enum_managedkafka"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Parameter Manager",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_parametermanager",
+            "info_blurb": "Enumerate Parameter Manager parameters and versions (GCP secrets/config store; parameter versions may contain plaintext secrets readable with parametermanager.parameterVersions.get).",
+            "location": "gcpwn.modules.gcp.parametermanager.enumeration.enum_parametermanager"
+          }
+        ]
+      }
+    },
+    {
+      "service": "BigQuery Connection",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_bigqueryconnection",
+            "info_blurb": "Enumerate BigQuery external data connections (Cloud SQL, Cloud Resource SA, AWS, Azure, Spark, Salesforce). Each connection stores external credentials or is backed by a GCP service account \u2014 list reveals which SAs have cross-service data access.",
+            "location": "gcpwn.modules.gcp.bigqueryconnection.enumeration.enum_bigqueryconnection"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Secure Source Manager",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_securesourcemanager",
+            "info_blurb": "Enumerate Secure Source Manager instances (managed Git hosting environments) and their repositories. Source code = secrets/infra configs. Supports testIamPermissions on both instances and repositories.",
+            "location": "gcpwn.modules.gcp.securesourcemanager.enumeration.enum_securesourcemanager"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Developer Connect",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_developerconnect",
+            "info_blurb": "Enumerate Developer Connect OAuth connections to GitHub, GitLab, Bitbucket, and Secure Source Manager, plus linked Git repository links. Reveals which external SCM repos and OAuth grants are linked to the project.",
+            "location": "gcpwn.modules.gcp.developerconnect.enumeration.enum_developerconnect"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Certificate Authority Service",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_privateca",
+            "info_blurb": "Enumerate Private CA Service CA pools and certificate authorities. CA pool access (privateca.caPools.use) = cert issuance = TLS identity forgery for internal mTLS-protected services. Supports testIamPermissions on CA pools.",
+            "location": "gcpwn.modules.gcp.privateca.enumeration.enum_privateca"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Datastream",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_datastream",
+            "info_blurb": "Enumerate Datastream connection profiles (source/destination DB credentials), streams, private connections (VPC peering), and routes. Use --download to save connection profile credential details (hostname, port, username, SSH/TLS config) to JSON files.",
+            "location": "gcpwn.modules.gcp.datastream.enumeration.enum_datastream"
+          }
+        ]
+      }
+    },
+    {
+      "service": "Cloud Domains",
+      "categories": {
+        "Enumeration": [
+          {
+            "module_name": "enum_clouddomains",
+            "info_blurb": "Enumerate Cloud Domains domain registrations (domain name, expiry, state, DNS config, registrant contact info). Use --download to save registrant/admin/technical contact settings (name, email, phone, address) to JSON files.",
+            "location": "gcpwn.modules.gcp.clouddomains.enumeration.enum_clouddomains"
+          }
+        ]
+      }
+    }
+  ]
+}

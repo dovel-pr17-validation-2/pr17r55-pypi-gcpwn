@@ -1,0 +1,1723 @@
+from __future__ import annotations
+
+"""
+OpenGraph pipeline orchestrator.
+
+Reader map:
+1) Parse CLI/runtime options.
+2) Choose stages and run in fixed order.
+3) Apply end-of-pipeline trim pass (default mode).
+4) Persist OpenGraph rows and export JSON snapshot.
+
+Stage map:
+- 1: principal + membership topology
+- 2: IAM policy-binding prep + dangerous-edge emit
+- 3: inferred-permission paths
+- 4: resource/identity expansion
+- 5: final trim
+"""
+
+import argparse
+import json
+import re
+import time
+from collections import Counter
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from pathlib import Path
+from typing import Any, TypedDict
+
+from gcpwn.core.console import UtilityTools
+from gcpwn.core.utils.module_helpers import parse_json_value
+from gcpwn.modules.opengraph.utilities.stage_2_policy_bindings import (
+    build_resolved_binding_entries,
+)
+from gcpwn.modules.opengraph.utilities.stage_3_inferred_permissions import (
+    build_iam_inferred_permissions_graph,
+)
+from gcpwn.modules.opengraph.utilities.stage_1_principals import build_users_groups_graph
+from gcpwn.modules.opengraph.utilities.stage_4_resource_expansion import build_resource_expansion_graph
+from gcpwn.modules.opengraph.utilities.stage_5_allowlist_trim import apply_final_allowlist_trims
+from gcpwn.modules.opengraph.utilities.helpers.graph.context import OpenGraphBuildContext, OpenGraphBuildOptions
+from gcpwn.modules.opengraph.utilities.helpers.graph.core_helpers import (
+    OpenGraphEdge,
+    OpenGraphNode,
+    edge_to_opengraph,
+    node_to_opengraph,
+    persist_opengraph,
+)
+
+class _StageSpec(TypedDict):
+    id: str
+    key: str
+    title: str
+
+
+_STAGE_REGISTRY: tuple[_StageSpec, ...] = (
+    {
+        "id": "1",
+        "key": "users_groups",
+        "title": "Users/Groups graph",
+    },
+    {
+        "id": "2",
+        "key": "iam_bindings",
+        "title": "IAM policy bindings graph",
+    },
+    {
+        "id": "3",
+        "key": "inferred_permissions",
+        "title": "Inferred permissions graph",
+    },
+    {
+        "id": "4",
+        "key": "resource_expansion",
+        "title": "Resource expansion graph",
+    },
+)
+
+_SPLIT_SECTION_KEYS: tuple[str, ...] = (
+    "users_groups",
+    "iam_bindings",
+    "inferred_permissions",
+    "resource_expansion",
+)
+_SPLIT_SECTION_ALIASES: dict[str, str] = {
+    "users_groups": "users_groups",
+    "users-groups": "users_groups",
+    "users/groups": "users_groups",
+    "usersgroups": "users_groups",
+    "groups": "users_groups",
+    "iam_bindings": "iam_bindings",
+    "iam-bindings": "iam_bindings",
+    "iam_policies": "iam_bindings",
+    "iam-policies": "iam_bindings",
+    "iampolicies": "iam_bindings",
+    "inferred_permissions": "inferred_permissions",
+    "inferred-permissions": "inferred_permissions",
+    "inferredpermissions": "inferred_permissions",
+    "resource_expansion": "resource_expansion",
+    "resource-expansion": "resource_expansion",
+    "resourceexpansion": "resource_expansion",
+}
+_USERS_GROUPS_SOURCE_HINTS: tuple[str, ...] = (
+    "workspace_users",
+    "workspace_groups",
+    "workspace_group_memberships",
+    "domain_wide_memberships",
+    "iam_members",
+    "stage_1_principals",
+)
+_RESOURCE_EXPANSION_SOURCE_HINTS: tuple[str, ...] = (
+    "resource_expansion",
+    "service_cache",
+    "cloudcompute_instances",
+    "workload_identity",
+    "iam_sa_keys",
+)
+_PRINCIPAL_NODE_KINDS: set[str] = {
+    "gcpallusers",
+    "gcpallauthenticatedusers",
+    "googleuser",
+    "googlegroup",
+    "gcpserviceaccount",
+    "gcpdomainprincipal",
+    "gcpconveniencemember",
+    "gcpprincipal",
+}
+
+
+# Shared progress helpers (see UtilityTools); aliased so the call sites below
+# keep their existing names.
+_print_inline_progress = UtilityTools.print_inline_progress
+_should_emit_progress = UtilityTools.should_emit_progress
+
+
+def _parse_split_sections(raw_value: str | None) -> list[str]:
+    if raw_value is None or not str(raw_value).strip():
+        return list(_SPLIT_SECTION_KEYS)
+
+    selected: list[str] = []
+    for token in str(raw_value).split(","):
+        normalized = _SPLIT_SECTION_ALIASES.get(str(token or "").strip().lower())
+        if not normalized:
+            raise ValueError(
+                f"Unsupported split section '{token}'. Supported values: "
+                f"{', '.join(_SPLIT_SECTION_KEYS)}"
+            )
+        if normalized not in selected:
+            selected.append(normalized)
+    return selected or list(_SPLIT_SECTION_KEYS)
+
+
+def _source_to_section(source_value: str) -> str | None:
+    source = str(source_value or "").strip().lower()
+    if not source:
+        return None
+    if source == "credential_permission_summary" or "inferred" in source:
+        return "inferred_permissions"
+    if source == "iam_allow_policies" or "iam_bindings" in source:
+        return "iam_bindings"
+    if source.startswith("workspace_") or source in _USERS_GROUPS_SOURCE_HINTS:
+        return "users_groups"
+    if any(hint in source for hint in _RESOURCE_EXPANSION_SOURCE_HINTS):
+        return "resource_expansion"
+    if source == "iam_service_accounts":
+        return "users_groups"
+    return None
+
+
+def _edge_section(edge: dict[str, Any]) -> str:
+    """Classify an exported edge into one split section, preferring its `source` provenance over its kind."""
+    props = edge.get("properties")
+    if isinstance(props, dict):
+        source_section = _source_to_section(str(props.get("source") or ""))
+        if source_section:
+            return source_section
+
+    kind = str(edge.get("kind") or "").strip().upper()
+    if kind.startswith("INFERRED_"):
+        return "inferred_permissions"
+    if "BINDING" in kind:
+        return "iam_bindings"
+    return "resource_expansion"
+
+
+def _node_section(node: dict[str, Any]) -> str:
+    """Classify an exported node into one split section, preferring its `source` provenance, then kinds."""
+    props = node.get("properties")
+    if isinstance(props, dict):
+        source_section = _source_to_section(str(props.get("source") or ""))
+        if source_section:
+            return source_section
+
+    kind_tokens = {str(kind or "").strip().lower() for kind in (node.get("kinds") or []) if str(kind or "").strip()}
+    if kind_tokens & _PRINCIPAL_NODE_KINDS:
+        return "users_groups"
+    if any("iambinding" in token for token in kind_tokens):
+        return "iam_bindings"
+    if any("key" in token or "workloadidentity" in token for token in kind_tokens):
+        return "resource_expansion"
+    return "resource_expansion"
+
+
+def _source_kind_only_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    token = str((metadata or {}).get("source_kind") or "").strip()
+    if not token:
+        return {}
+    return {"source_kind": token}
+
+
+def _build_split_graph_payload(*, metadata: dict[str, Any], nodes: list[dict[str, Any]], edges: list[dict[str, Any]]) -> dict[str, Any]:
+    """
+    Build split-file payload with strict OpenGraph top-level shape for import:
+    - optional metadata with only source_kind
+    - graph with nodes/edges
+    """
+    payload: dict[str, Any] = {"graph": {"nodes": list(nodes or []), "edges": list(edges or [])}}
+    split_metadata = _source_kind_only_metadata(metadata)
+    if split_metadata:
+        payload["metadata"] = split_metadata
+    return payload
+
+
+def _write_json_payload(path: Path, payload: dict[str, Any]) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2)
+
+
+def _json_value_size_bytes(value: Any) -> int:
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+
+def _write_graph_json_with_progress(output_path: str, payload: dict[str, Any]) -> None:
+    """
+    Stream the single-file OpenGraph JSON to disk node-by-node/edge-by-edge with progress.
+
+    Streams rather than json.dump(payload) because full graphs can be very large; it
+    writes the metadata/graph/summary envelope by hand and emits each node/edge object
+    individually so memory stays bounded and a live progress line is shown. The resulting
+    file is the same OpenGraph contract shape export_opengraph_json produced.
+    """
+    metadata = _source_kind_only_metadata(dict(payload.get("metadata") or {}))
+    graph = dict(payload.get("graph") or {})
+    nodes = [node for node in (graph.get("nodes") or []) if isinstance(node, dict)]
+    edges = [edge for edge in (graph.get("edges") or []) if isinstance(edge, dict)]
+    summary = dict(payload.get("summary") or {"nodes": len(nodes), "edges": len(edges)})
+    total_records = len(nodes) + len(edges)
+
+    print(f"[*] Main JSON write tally: nodes={len(nodes)}, edges={len(edges)}, total_records={total_records}")
+
+    with open(output_path, "w", encoding="utf-8") as handle:
+        handle.write("{\n")
+        handle.write('  "metadata": ')
+        json.dump(metadata, handle, ensure_ascii=False, separators=(",", ":"))
+        handle.write(",\n")
+        handle.write('  "graph": {\n')
+        handle.write('    "nodes": [')
+        for index, node in enumerate(nodes, start=1):
+            if index > 1:
+                handle.write(",")
+            json.dump(node, handle, ensure_ascii=False, separators=(",", ":"))
+            _print_inline_progress("Main JSON write (nodes)", index, len(nodes))
+        _print_inline_progress("Main JSON write (nodes)", len(nodes), len(nodes), force=True)
+        handle.write("],\n")
+        handle.write('    "edges": [')
+        for index, edge in enumerate(edges, start=1):
+            if index > 1:
+                handle.write(",")
+            json.dump(edge, handle, ensure_ascii=False, separators=(",", ":"))
+            overall = len(nodes) + index
+            _print_inline_progress("Main JSON write (overall)", overall, total_records)
+        _print_inline_progress("Main JSON write (overall)", total_records, total_records, force=True)
+        handle.write("]\n")
+        handle.write("  },\n")
+        handle.write('  "summary": ')
+        json.dump(summary, handle, ensure_ascii=False, separators=(",", ":"))
+        handle.write("\n}\n")
+
+
+def _stream_export_graph_json(output_path, node_objs, edge_objs, *, debug: bool = False) -> None:
+    """Convert + sort + write the single-file OpenGraph JSON one SECTION at a time.
+
+    Byte-for-byte identical to ``export_opengraph_json`` followed by
+    ``_write_graph_json_with_progress``, but it converts and sorts the NODES, writes them, and
+    frees that converted list BEFORE converting the EDGES -- so the two per-section converted
+    lists never coexist. In combo-heavy graphs each section is ~the size of the whole graph, so
+    this roughly halves the export-phase peak versus building the full payload first. Inputs are
+    consumed (popped) so the original node/edge objects free as their converted dicts build.
+    """
+    UtilityTools.dlog(
+        debug, "stream-export: loaded graph objects",
+        nodes=len(node_objs or []), edges=len(edge_objs or []),
+    )
+    if isinstance(node_objs, list):
+        nodes = []
+        while node_objs:
+            nodes.append(node_to_opengraph(node_objs.pop()))
+    else:
+        nodes = [node_to_opengraph(r) for r in (node_objs or [])]
+    nodes.sort(key=lambda n: str(n["id"] or ""))
+    node_count = len(nodes)
+    print(f"[*] Streaming JSON write: {node_count} nodes, then edges...")
+
+    with open(output_path, "w", encoding="utf-8") as handle:
+        handle.write("{\n")
+        handle.write('  "metadata": ')
+        json.dump({"source_kind": "GCPBase"}, handle, ensure_ascii=False, separators=(",", ":"))
+        handle.write(",\n")
+        handle.write('  "graph": {\n')
+        handle.write('    "nodes": [')
+        for index, node in enumerate(nodes, start=1):
+            if index > 1:
+                handle.write(",")
+            json.dump(node, handle, ensure_ascii=False, separators=(",", ":"))
+            _print_inline_progress("Main JSON write (nodes)", index, node_count)
+        _print_inline_progress("Main JSON write (nodes)", node_count, node_count, force=True)
+        del nodes  # free converted nodes before building converted edges (the whole point)
+        handle.write("],\n")
+        handle.write('    "edges": [')
+
+        if isinstance(edge_objs, list):
+            edges = []
+            while edge_objs:
+                edges.append(edge_to_opengraph(edge_objs.pop()))
+        else:
+            edges = [edge_to_opengraph(r) for r in (edge_objs or [])]
+        # Same two-stage sort as export_opengraph_json (cheap triple sort, json tiebreak only
+        # on collision runs) -- byte-identical order, no ~1GB of json key strings.
+        def _edge_triple(e):
+            return (str(e["start"]["value"] or ""), str(e["end"]["value"] or ""), str(e["kind"] or ""))
+
+        edges.sort(key=_edge_triple)
+        i, m = 0, len(edges)
+        while i < m:
+            j = i + 1
+            while j < m and _edge_triple(edges[j]) == _edge_triple(edges[i]):
+                j += 1
+            if j - i > 1:
+                edges[i:j] = sorted(
+                    edges[i:j],
+                    key=lambda e: json.dumps(e.get("properties") or {}, sort_keys=True, ensure_ascii=False),
+                )
+            i = j
+        edge_count = len(edges)
+        total = node_count + edge_count
+        for index, edge in enumerate(edges, start=1):
+            if index > 1:
+                handle.write(",")
+            json.dump(edge, handle, ensure_ascii=False, separators=(",", ":"))
+            _print_inline_progress("Main JSON write (overall)", node_count + index, total)
+        _print_inline_progress("Main JSON write (overall)", total, total, force=True)
+        del edges
+        handle.write("]\n")
+        handle.write("  },\n")
+        handle.write('  "summary": ')
+        json.dump({"nodes": node_count, "edges": edge_count}, handle, ensure_ascii=False, separators=(",", ":"))
+        handle.write("\n}\n")
+
+
+def _write_split_outputs(
+    *,
+    base_output_path: str,
+    payload: dict[str, Any],
+    selected_sections: list[str],
+    max_size_mb: float,
+    size_tolerance_mb: float = 25.0,
+    split_threads: int = 1,
+    split_output_dir: str | None = None,
+    manifest_output_dir: str | None = None,
+    debug: bool = False,
+) -> tuple[list[str], str]:
+    """
+    Write the graph as per-section, size-bounded JSON parts plus a manifest, for BloodHound.
+
+    Splits the single payload into sections (users_groups / iam_bindings /
+    inferred_permissions / resource_expansion) by classifying each node/edge
+    (_node_section/_edge_section), then chunks each section into parts that stay within
+    ~max_size_mb +/- size_tolerance_mb (a soft band chosen for speed, not exact sizing).
+    Each part is a self-contained OpenGraph payload: every node referenced by a part's
+    edges is included, so parts import independently. Single-part sections are renamed to
+    the legacy `<stem>_<section>.json`. Optionally parallelizes file writes across
+    split_threads. Returns (list_of_written_files_incl_manifest, manifest_path).
+
+    Each part re-emits its border nodes, so node counts across parts overlap by design.
+    """
+    max_size_bytes = max(1, int(float(max_size_mb) * 1024 * 1024))
+    tolerance_bytes = max(0, int(float(size_tolerance_mb) * 1024 * 1024))
+    soft_min_bytes = max(1, max_size_bytes - tolerance_bytes)
+    soft_max_bytes = max_size_bytes + tolerance_bytes
+    metadata = dict(payload.get("metadata") or {})
+    graph = dict(payload.get("graph") or {})
+    all_nodes = [node for node in (graph.get("nodes") or []) if isinstance(node, dict)]
+    all_edges = [edge for edge in (graph.get("edges") or []) if isinstance(edge, dict)]
+    node_index = {
+        str(node.get("id") or "").strip(): node
+        for node in all_nodes
+        if str(node.get("id") or "").strip()
+    }
+    node_serialized_size = {
+        node_id: _json_value_size_bytes(node)
+        for node_id, node in node_index.items()
+    }
+
+    section_edges: dict[str, list[dict[str, Any]]] = {key: [] for key in _SPLIT_SECTION_KEYS}
+    section_node_ids: dict[str, set[str]] = {key: set() for key in _SPLIT_SECTION_KEYS}
+
+    for node in all_nodes:
+        node_id = str(node.get("id") or "").strip()
+        if not node_id:
+            continue
+        section_node_ids[_node_section(node)].add(node_id)
+    _print_inline_progress("Split planner classify nodes", len(all_nodes), len(all_nodes), force=True)
+
+    total_all_edges = len(all_edges)
+    for index, edge in enumerate(all_edges, start=1):
+        section_edges[_edge_section(edge)].append(edge)
+        _print_inline_progress("Split planner classify edges", index, total_all_edges)
+    _print_inline_progress("Split planner classify edges", total_all_edges, total_all_edges, force=True)
+
+    base_path = Path(base_output_path)
+    output_dir = Path(split_output_dir).expanduser() if split_output_dir else base_path.parent
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stem = base_path.stem
+    written_files: list[str] = []
+    manifest_sections: dict[str, Any] = {}
+    selected_sections_with_data: list[str] = []
+    written_split_files = 0
+    section_estimated_parts: dict[str, int] = {}
+    worker_count = max(1, int(split_threads or 1))
+    print(
+        "[*] Split size policy: "
+        f"target={float(max_size_mb):g}MB, "
+        f"tolerance=+/-{float(size_tolerance_mb):g}MB, "
+        f"range={soft_min_bytes / (1024 * 1024):.2f}-{soft_max_bytes / (1024 * 1024):.2f}MB"
+    )
+
+    for section in selected_sections:
+        edges = list(section_edges.get(section) or [])
+        seeded_node_ids = set(section_node_ids.get(section) or set())
+
+        if not edges and not seeded_node_ids:
+            continue
+        selected_sections_with_data.append(section)
+
+        referenced_node_ids: set[str] = set()
+        total_section_edges = len(edges)
+        for edge_index, edge in enumerate(edges, start=1):
+            start = str((((edge.get("start") or {}) if isinstance(edge.get("start"), dict) else {}).get("value") or "")).strip()
+            end = str((((edge.get("end") or {}) if isinstance(edge.get("end"), dict) else {}).get("value") or "")).strip()
+            if start:
+                referenced_node_ids.add(start)
+            if end:
+                referenced_node_ids.add(end)
+            _print_inline_progress(
+                f"Split planner ({section}) map edge refs",
+                edge_index,
+                total_section_edges,
+            )
+        _print_inline_progress(
+            f"Split planner ({section}) map edge refs",
+            total_section_edges,
+            total_section_edges,
+            force=True,
+        )
+        seeded_node_ids.update(referenced_node_ids)
+        seeded_nodes = [
+            node_index[node_id]
+            for node_id in sorted(seeded_node_ids)
+            if node_id in node_index
+        ]
+
+        current_edges: list[dict[str, Any]] = []
+        current_edge_node_ids: set[str] = set()
+        current_edges_bytes = 0
+        current_nodes_bytes = 0
+        current_node_count = 0
+        base_chunk_overhead_bytes = _json_value_size_bytes(
+            _build_split_graph_payload(
+                metadata=metadata,
+                nodes=[],
+                edges=[],
+            )
+        )
+        section_file_paths: list[str] = []
+        section_nodes_written = 0
+        section_edges_written = 0
+        section_part_index = 0
+        section_file_paths_by_part: dict[int, str] = {}
+        pending_writes: list[tuple[Any, int, Path, int, int]] = []
+        executor = ThreadPoolExecutor(max_workers=worker_count) if worker_count > 1 else None
+
+        def _record_completed_writes(completed_items: list[tuple[Any, int, Path, int, int]]) -> None:
+            nonlocal written_split_files, section_nodes_written, section_edges_written
+            for future, part_index, part_path, node_count, edge_count in completed_items:
+                future.result()
+                section_file_paths_by_part[part_index] = str(part_path)
+                written_files.append(str(part_path))
+                written_split_files += 1
+                section_nodes_written += node_count
+                section_edges_written += edge_count
+                print(
+                    f"[*] Split write progress: files_written={written_split_files} "
+                    f"(section={section}, part={part_index}) -> {part_path}"
+                )
+
+        def _drain_pending_writes(*, force: bool) -> None:
+            nonlocal pending_writes
+            if not pending_writes:
+                return
+            if force:
+                completed_items = list(pending_writes)
+                pending_writes = []
+                _record_completed_writes(completed_items)
+                return
+            done_futures, _ = wait(
+                [item[0] for item in pending_writes],
+                return_when=FIRST_COMPLETED,
+            )
+            if not done_futures:
+                return
+            completed_items: list[tuple[Any, int, Path, int, int]] = []
+            remaining_items: list[tuple[Any, int, Path, int, int]] = []
+            for item in pending_writes:
+                if item[0] in done_futures:
+                    completed_items.append(item)
+                else:
+                    remaining_items.append(item)
+            pending_writes = remaining_items
+            _record_completed_writes(completed_items)
+
+        def _flush_chunk(extra_nodes: list[dict[str, Any]] | None = None) -> bool:
+            nonlocal section_part_index, written_split_files, section_nodes_written, section_edges_written
+            if not current_edges and not extra_nodes:
+                return False
+            edge_nodes = [
+                node_index[node_id]
+                for node_id in sorted(current_edge_node_ids)
+                if node_id in node_index
+            ]
+            nodes_for_chunk = edge_nodes
+            if extra_nodes:
+                seen = {str(node.get("id") or "").strip() for node in edge_nodes}
+                for node in extra_nodes:
+                    node_id = str(node.get("id") or "").strip()
+                    if not node_id or node_id in seen:
+                        continue
+                    seen.add(node_id)
+                    nodes_for_chunk.append(node)
+            chunk_payload = _build_split_graph_payload(
+                metadata=metadata,
+                nodes=nodes_for_chunk,
+                edges=list(current_edges),
+            )
+            section_part_index += 1
+            section_filename = f"{stem}_{section}_part{section_part_index}.json"
+            section_path = output_dir / section_filename
+            chunk_node_count = len(nodes_for_chunk)
+            chunk_edge_count = len(current_edges)
+            if executor is None:
+                _write_json_payload(section_path, chunk_payload)
+                section_file_paths_by_part[section_part_index] = str(section_path)
+                written_files.append(str(section_path))
+                written_split_files += 1
+                section_nodes_written += chunk_node_count
+                section_edges_written += chunk_edge_count
+                print(
+                    f"[*] Split write progress: files_written={written_split_files} "
+                    f"(section={section}, part={section_part_index}) -> {section_path}"
+                )
+            else:
+                future = executor.submit(_write_json_payload, section_path, chunk_payload)
+                pending_writes.append((future, section_part_index, section_path, chunk_node_count, chunk_edge_count))
+                if len(pending_writes) >= max(2, worker_count * 2):
+                    _drain_pending_writes(force=False)
+            return True
+
+        for edge_index, edge in enumerate(edges, start=1):
+            start = str((((edge.get("start") or {}) if isinstance(edge.get("start"), dict) else {}).get("value") or "")).strip()
+            end = str((((edge.get("end") or {}) if isinstance(edge.get("end"), dict) else {}).get("value") or "")).strip()
+            trial_edges = [*current_edges, edge]
+            trial_edge_node_ids = set(current_edge_node_ids)
+            new_node_ids: list[str] = []
+            if start:
+                if start not in trial_edge_node_ids and start in node_index:
+                    new_node_ids.append(start)
+                trial_edge_node_ids.add(start)
+            if end:
+                if end not in trial_edge_node_ids and end in node_index:
+                    new_node_ids.append(end)
+                trial_edge_node_ids.add(end)
+            edge_size = _json_value_size_bytes(edge)
+            new_node_bytes = sum(node_serialized_size.get(node_id, 0) for node_id in new_node_ids)
+            trial_edges_bytes = current_edges_bytes + edge_size
+            trial_nodes_bytes = current_nodes_bytes + new_node_bytes
+            trial_node_count = current_node_count + len(new_node_ids)
+            trial_edge_count = len(current_edges) + 1
+            trial_estimated_bytes = (
+                base_chunk_overhead_bytes
+                + trial_edges_bytes
+                + trial_nodes_bytes
+                + max(0, trial_edge_count - 1)
+                + max(0, trial_node_count - 1)
+            )
+            current_estimated_bytes = (
+                base_chunk_overhead_bytes
+                + current_edges_bytes
+                + current_nodes_bytes
+                + max(0, len(current_edges) - 1)
+                + max(0, current_node_count - 1)
+            )
+            if current_edges and trial_estimated_bytes > soft_max_bytes and current_estimated_bytes >= soft_min_bytes:
+                _flush_chunk()
+                current_edges = []
+                current_edge_node_ids = set()
+                current_edges_bytes = 0
+                current_nodes_bytes = 0
+                current_node_count = 0
+                trial_edges = [edge]
+                trial_edge_node_ids = set()
+                new_node_ids = []
+                if start:
+                    if start in node_index:
+                        new_node_ids.append(start)
+                    trial_edge_node_ids.add(start)
+                if end:
+                    if end in node_index and end not in new_node_ids:
+                        new_node_ids.append(end)
+                    trial_edge_node_ids.add(end)
+                trial_edges_bytes = edge_size
+                trial_nodes_bytes = sum(node_serialized_size.get(node_id, 0) for node_id in new_node_ids)
+                trial_node_count = len(new_node_ids)
+
+            current_edges = trial_edges
+            current_edge_node_ids = trial_edge_node_ids
+            current_edges_bytes = trial_edges_bytes
+            current_nodes_bytes = trial_nodes_bytes
+            current_node_count = trial_node_count
+            _print_inline_progress(
+                f"Split planner ({section}) chunk edges",
+                edge_index,
+                total_section_edges,
+            )
+        _print_inline_progress(
+            f"Split planner ({section}) chunk edges",
+            total_section_edges,
+            total_section_edges,
+            force=True,
+        )
+
+        standalone_nodes = [
+            node
+            for node in seeded_nodes
+            if str(node.get("id") or "").strip() not in current_edge_node_ids
+        ]
+
+        if current_edges:
+            _flush_chunk(extra_nodes=standalone_nodes)
+        elif standalone_nodes:
+            chunk_nodes: list[dict[str, Any]] = []
+            chunk_nodes_bytes = 0
+            for node in standalone_nodes:
+                node_id = str(node.get("id") or "").strip()
+                node_size = node_serialized_size.get(node_id, _json_value_size_bytes(node))
+                trial_nodes_bytes = chunk_nodes_bytes + node_size
+                trial_node_count = len(chunk_nodes) + 1
+                trial_estimated_bytes = (
+                    base_chunk_overhead_bytes
+                    + trial_nodes_bytes
+                    + max(0, trial_node_count - 1)
+                )
+                current_estimated_bytes = (
+                    base_chunk_overhead_bytes
+                    + chunk_nodes_bytes
+                    + max(0, len(chunk_nodes) - 1)
+                )
+                if chunk_nodes and trial_estimated_bytes > soft_max_bytes and current_estimated_bytes >= soft_min_bytes:
+                    current_edges = []
+                    current_edge_node_ids = set()
+                    _flush_chunk(extra_nodes=list(chunk_nodes))
+                    chunk_nodes = [node]
+                    chunk_nodes_bytes = node_size
+                else:
+                    chunk_nodes.append(node)
+                    chunk_nodes_bytes = trial_nodes_bytes
+            if chunk_nodes:
+                current_edges = []
+                current_edge_node_ids = set()
+                _flush_chunk(extra_nodes=list(chunk_nodes))
+
+        _drain_pending_writes(force=True)
+        if executor is not None:
+            executor.shutdown(wait=True)
+        section_file_paths = [
+            section_file_paths_by_part[index]
+            for index in sorted(section_file_paths_by_part)
+        ]
+        section_estimated_parts[section] = section_part_index
+        if len(section_file_paths) == 1:
+            legacy_section_path = output_dir / f"{stem}_{section}.json"
+            current_section_path = Path(section_file_paths[0])
+            if current_section_path != legacy_section_path:
+                current_section_path.replace(legacy_section_path)
+                section_file_paths[0] = str(legacy_section_path)
+                if written_files:
+                    written_files[-1] = str(legacy_section_path)
+        manifest_sections[section] = {
+            "parts": len(section_file_paths),
+            "files": section_file_paths,
+            "nodes": section_nodes_written,
+            "edges": section_edges_written,
+        }
+        UtilityTools.dlog(
+            debug,
+            "opengraph split section complete",
+            section=section,
+            parts=len(section_file_paths),
+            files=section_file_paths,
+        )
+
+    planned_sections_with_data = len(selected_sections_with_data)
+    planned_split_files = int(sum(section_estimated_parts.values()))
+    print(
+        "[*] Split planner: "
+        f"selected_sections={len(selected_sections)}, "
+        f"sections_with_data={planned_sections_with_data}, "
+        f"planned_json_files={planned_split_files}"
+    )
+
+    manifest_payload = {
+        "metadata": {
+            **metadata,
+            "source_file": str(base_path),
+            "max_target_size_mb": float(max_size_mb),
+            "size_tolerance_mb": float(size_tolerance_mb),
+            "split_threads": worker_count,
+            "selected_sections": list(selected_sections),
+        },
+        "sections": manifest_sections,
+        "summary": {
+            "files_written": len(written_files),
+            "sections_written": len([section for section in selected_sections if section in manifest_sections]),
+        },
+    }
+    if manifest_output_dir:
+        manifest_dir = Path(manifest_output_dir).expanduser()
+    elif output_dir.name == "split_json":
+        manifest_dir = output_dir.parent
+    else:
+        manifest_dir = output_dir
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = manifest_dir / f"{stem}_split_manifest.json"
+    with manifest_path.open("w", encoding="utf-8") as handle:
+        json.dump(manifest_payload, handle, ensure_ascii=False, indent=2)
+    written_files.append(str(manifest_path))
+    return written_files, str(manifest_path)
+
+
+_STRUCTURAL_EDGE_KINDS: frozenset[str] = frozenset({
+    "HAS_IAM_BINDING", "HAS_COMBO_BINDING", "HasImpliedPermissions", "POLICY_BINDINGS",
+    "RunsAs", "ExistsInProject", "ServiceAccountKeyFor", "MemberOfPrincipalSet",
+    "IdentityProviderInPool", "FederatedPrincipalInPool", "CanFederateWith", "CanFederateAs",
+    "MemberOf", "InDomain", "CanImpersonate", "CanResetPassword", "DomainWideDelegateTo",
+    "DelegatesInto", "WorkspaceMember", "CanJoin", "CanRead",
+})
+_PRINCIPAL_NODE_KINDS: frozenset[str] = frozenset({
+    "GoogleUser", "GoogleGroup", "GCPServiceAccount", "GCPDomainPrincipal", "GCPAllUsers",
+    "GCPAllAuthenticatedUsers", "GCPPrincipalSet", "GCPPrincipal", "PrincipalsInOrg",
+    "GoogleWorkspaceTenant", "GCPExternalIdentitySource",
+})
+
+
+def _print_edge_breakdown(nodes, edges, *, top: int = 15) -> None:
+    """Print which edge kinds and which source principals dominate the graph.
+
+    Pure read over the finished in-memory graph (no mutation). On a graph that is
+    exploding during the combo pass, this is the fastest way to see WHAT is exploding
+    so the culprit rule/category can be excluded (``--edge-categories``) or capped.
+    ``edges``/``nodes`` are OpenGraphEdge/OpenGraphNode objects.
+    """
+    total_edges = len(edges or [])
+    if not total_edges:
+        return
+    kind_counts: Counter[str] = Counter(str(e.edge_type) for e in edges)
+
+    # Resolve each dangerous (rule-named, non-structural) edge back to the principal that
+    # owns its chain: principal -[HAS_*]-> binding/combo -[RULE]-> (capability) -[RULE]-> target.
+    node_kind = {n.node_id: n.node_type for n in (nodes or [])}
+    owner_of: dict[str, str] = {}  # binding/combo/capability node -> principal node id
+    for e in edges:
+        if e.edge_type in ("HAS_IAM_BINDING", "HAS_COMBO_BINDING", "HasImpliedPermissions"):
+            owner_of.setdefault(e.destination_id, e.source_id)
+    # capability nodes are reached from a combo node via a rule-named hop; inherit its owner
+    for e in edges:
+        if e.edge_type not in _STRUCTURAL_EDGE_KINDS and e.source_id in owner_of and e.destination_id not in owner_of:
+            if node_kind.get(e.destination_id) == "GCPIamCapability":
+                owner_of[e.destination_id] = owner_of[e.source_id]
+
+    principal_edge_counts: Counter[str] = Counter()
+    for e in edges:
+        if e.edge_type in _STRUCTURAL_EDGE_KINDS:
+            continue
+        actor = owner_of.get(e.source_id)
+        if actor is None and node_kind.get(e.source_id) in _PRINCIPAL_NODE_KINDS:
+            actor = e.source_id
+        if actor:
+            principal_edge_counts[actor] += 1
+
+    print(f"[*] Edge-kind breakdown ({total_edges:,} edges across {len(kind_counts)} kinds; top {top}):")
+    for kind, count in kind_counts.most_common(top):
+        marker = "" if kind in _STRUCTURAL_EDGE_KINDS else "  <- dangerous-rule edge"
+        print(f"      {count:>10,}  {kind}{marker}")
+    if principal_edge_counts:
+        print(f"[*] Top {top} principals by dangerous-rule edge fan-out (where the edges originate):")
+        for principal, count in principal_edge_counts.most_common(top):
+            print(f"      {count:>10,}  {principal}")
+
+
+def export_opengraph_json(nodes_in_memory, edges_in_memory, *, debug: bool = False):
+    """
+    Render in-memory nodes/edges into the single-file OpenGraph JSON payload.
+
+    Converts each node/edge through node_to_opengraph/edge_to_opengraph (which enforce the
+    BloodHound id/kinds/edge contract), then sorts nodes by id and edges by
+    (start, end, kind) so exports are deterministic/diffable. Returns the
+    {"metadata": {"source_kind": "GCPBase"}, "graph": {...}, "summary": {...}} payload that
+    the writers consume; the "GCPBase" source_kind is part of the import contract.
+    """
+    UtilityTools.dlog(
+        debug,
+        "export: loaded graph objects",
+        nodes=len(nodes_in_memory or []),
+        edges=len(edges_in_memory or []),
+    )
+
+    # Convert while CONSUMING the input lists: pop each original node/edge object as it is
+    # converted so the in-memory OpenGraphNode/Edge objects free incrementally instead of
+    # co-existing with the full converted copy at peak. (Lists only; other iterables fall
+    # back to a plain comprehension.) Order is normalized by the sort below, so popping —
+    # which reverses input order — does not affect the byte-reproducible output.
+    if isinstance(nodes_in_memory, list):
+        nodes = []
+        while nodes_in_memory:
+            nodes.append(node_to_opengraph(nodes_in_memory.pop()))
+    else:
+        nodes = [node_to_opengraph(r) for r in (nodes_in_memory or [])]
+    if isinstance(edges_in_memory, list):
+        edges = []
+        while edges_in_memory:
+            edges.append(edge_to_opengraph(edges_in_memory.pop()))
+    else:
+        edges = [edge_to_opengraph(r) for r in (edges_in_memory or [])]
+
+    # In-place sort avoids allocating a second full list (sorted() would), halving the
+    # transient peak of the sort step.
+    nodes.sort(key=lambda n: str(n["id"] or ""))
+    # (start, end, kind) is not a total order: distinct raw edge_types can sanitize to the
+    # same kind on the same endpoints, leaving ties broken by insertion order (run-to-run
+    # nondeterministic). A total order needs a stable serialization of the properties as the
+    # final tiebreak -- but using json.dumps(properties) as a 4th sort key materializes one
+    # ~1KB string PER EDGE for the whole sort (~1GB transient at 1M edges). Instead do it in
+    # two stages, which is PROVABLY the same ordering as the 4-key sort: (1) stable sort by
+    # the cheap (start,end,kind) triple, then (2) json-sub-sort ONLY the runs where that
+    # triple repeats (rare -- only distinct raw edge_types that sanitize to the same kind on
+    # the same endpoints). json is then built for the colliding subset, not all N edges.
+    def _edge_triple(e):
+        return (str(e["start"]["value"] or ""), str(e["end"]["value"] or ""), str(e["kind"] or ""))
+
+    edges.sort(key=_edge_triple)
+    i, n = 0, len(edges)
+    while i < n:
+        j = i + 1
+        while j < n and _edge_triple(edges[j]) == _edge_triple(edges[i]):
+            j += 1
+        if j - i > 1:  # a real collision run: resolve it with the exact legacy json tiebreak
+            edges[i:j] = sorted(
+                edges[i:j],
+                key=lambda e: json.dumps(e.get("properties") or {}, sort_keys=True, ensure_ascii=False),
+            )
+        i = j
+
+    UtilityTools.dlog(debug, "export: final graph", unique_nodes=len(nodes), unique_edges=len(edges))
+    payload = {
+        "metadata": {
+            "source_kind": "GCPBase",
+        },
+        "graph": {"nodes": nodes, "edges": edges},
+        "summary": {"nodes": len(nodes), "edges": len(edges)},
+    }
+    return payload
+
+
+def _safe_export_token(raw_value: str | None) -> str:
+    token = str(raw_value or "").strip()
+    if not token:
+        return "export"
+    normalized = re.sub(r"[^A-Za-z0-9_-]+", "_", token).strip("_")
+    return normalized or "export"
+
+
+def _auto_cross_project_sa_projects(data_source) -> frozenset[str]:
+    """Project ids whose org policy explicitly does NOT enforce cross-project SA usage.
+
+    ``iam.disableCrossProjectServiceAccountUsage`` enforced (the GCP default) blocks a
+    principal in project A from using an SA in project B. When a project's org policy sets
+    that constraint to ``not_enforced``, cross-project impersonation of its SAs IS allowed,
+    so those SA home-projects can safely be graphed cross-project without the operator
+    having to name them by hand. Returns the set of such project ids (empty when org-policy
+    data is absent, i.e. the asset/orgpolicy enumerators were not run)."""
+    projects: set[str] = set()
+    for row in (data_source.get_data("orgpolicy_policies") or []):
+        constraint = str((row or {}).get("constraint") or "")
+        if "disableCrossProjectServiceAccountUsage" not in constraint:
+            continue
+        # rule_summary encodes boolean-constraint state as "enforce" / "not_enforced".
+        if "not_enforced" not in str((row or {}).get("rule_summary") or ""):
+            continue
+        project_id = str((row or {}).get("project_id") or "").strip()
+        if project_id:
+            projects.add(project_id)
+    return frozenset(projects)
+
+
+def _resolve_export_paths(session, args) -> tuple[str, str | None]:
+    # Custom output path mode:
+    # - --out/-o is treated as an OUTPUT DIRECTORY, not a file path.
+    # - Single JSON + split outputs are written directly in that directory.
+    custom_out = str(getattr(args, "out", "") or "").strip()
+    if custom_out:
+        out_dir = Path(custom_out).expanduser()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_name = _safe_export_token(out_dir.name)
+        single_json_path = out_dir / f"opengraph_{out_name}.json"
+        return str(single_json_path), str(out_dir)
+
+    # Default output mode:
+    # - Build snapshot name as before, then create a bundle directory:
+    #   opengraph_<id>/single_json/<single.json>
+    #   opengraph_<id>/split_json/<split files + manifest>
+    default_single = Path(
+        str(
+            session.resolve_output_path(
+                requested_path=None,
+                service_name="reports",
+                filename=f"opengraph_{int(time.time())}.json",
+                subdirs=["snapshots"],
+                target="export",
+            )
+        )
+    )
+    bundle_dir = default_single.parent / default_single.stem
+    single_json_dir = bundle_dir / "single_json"
+    split_json_dir = bundle_dir / "split_json"
+    single_json_dir.mkdir(parents=True, exist_ok=True)
+    split_json_dir.mkdir(parents=True, exist_ok=True)
+    return str(single_json_dir / default_single.name), str(split_json_dir)
+
+
+def _parse_args(user_args):
+    parser = argparse.ArgumentParser(
+        description="Build GCP OpenGraph data offline from cached SQLite tables",
+        allow_abbrev=False,
+    )
+
+    # Logging
+    parser.add_argument("-v", "--debug", action="store_true", help="Verbose output")
+
+    # Output / persistence
+    parser.add_argument(
+        "-o",
+        "--out",
+        required=False,
+        help=(
+            "Optional output directory for OpenGraph JSON exports. "
+            "When provided, files are written into this folder as opengraph_<folder_name>.json "
+            "and matching split outputs."
+        ),
+    )
+    parser.add_argument("--reset", action="store_true", help="Delete existing OpenGraph rows for this workspace before rebuilding")
+    parser.add_argument(
+        "--use-existing-opengraph-db",
+        action="store_true",
+        help=(
+            "Skip graph rebuild and use existing opengraph_nodes/opengraph_edges from the current workspace. "
+            "Useful for re-exporting graph JSON without rebuilding."
+        ),
+    )
+    parser.add_argument(
+        "--cai-file",
+        required=False,
+        help=(
+            "Build the graph directly from a Cloud Asset Inventory export file (NDJSON from "
+            "`gcloud asset export`, or a JSON array of assets) INSTEAD of the SQLite tables. "
+            "No prior enumeration is needed; the generated graph is exported but NOT persisted "
+            "to this workspace's opengraph tables."
+        ),
+    )
+    parser.add_argument(
+        "--split-json-output",
+        action="store_true",
+        help=(
+            "Additionally write sectioned/chunked OpenGraph JSON files for easier BloodHound uploads. "
+            "Base single-file export is still written (unless --split-json-only)."
+        ),
+    )
+    parser.add_argument(
+        "--split-json-only",
+        action="store_true",
+        help=(
+            "With --split-json-output, skip writing the large combined single-file export and "
+            "write ONLY the split section/part files (+ manifest). Saves the disk space and the "
+            "extra serialization pass of the monolithic file."
+        ),
+    )
+    parser.add_argument(
+        "--split-json-sections",
+        required=False,
+        default="users_groups,iam_bindings,inferred_permissions,resource_expansion",
+        help=(
+            "Comma list of split sections to emit. Supported: "
+            "users_groups, iam_bindings, inferred_permissions, resource_expansion"
+        ),
+    )
+    parser.add_argument(
+        "--split-json-max-size-mb",
+        type=float,
+        default=50.0,
+        required=False,
+        help=(
+            "Target split-part size center (MB). Used with --split-json-size-tolerance-mb "
+            "as an approximate +/- range. Default center: 50 MB."
+        ),
+    )
+    parser.add_argument(
+        "--split-json-size-tolerance-mb",
+        type=float,
+        default=25.0,
+        required=False,
+        help=(
+            "Tolerance (MB) around --split-json-max-size-mb for faster chunking "
+            "(approximate range, best-effort). Default: +/-25 MB."
+        ),
+    )
+    parser.add_argument(
+        "--split-json-threads",
+        type=int,
+        default=1,
+        required=False,
+        help=(
+            "Thread count for writing split JSON output files. "
+            "Default 1 (sequential); increase for parallel writes."
+        ),
+    )
+
+    # IAM graph behavior
+    parser.add_argument("--include-all", action="store_true", help="Include generic IAM binding edges (not only dangerous built-in edges)")
+    parser.add_argument(
+        "--edge-categories",
+        dest="edge_categories",
+        metavar="CATEGORIES",
+        default=None,
+        help=(
+            "Comma-separated edge categories to include from og_defined_edges.json "
+            "(default: priv_escalation; plus CAN_READ_SECRET_DATA, which is always on). "
+            "Categories: priv_escalation (PE paths — default), sensitive_resource_access "
+            "(other sensitive reads: KMS decrypt/sign, BigQuery exfil, Cloud SQL, API keys, "
+            "Workstations, DeveloperConnect — opt-in), storage_read_access (CAN_READ_STORAGE_OBJECT "
+            "— opt-in, adds significant edge volume). Pass 'all' to include every category. "
+            "Example: --edge-categories priv_escalation,sensitive_resource_access,storage_read_access"
+        ),
+    )
+    parser.add_argument("--expand-inherited", action="store_true", help="Expand inherited IAM bindings from org/folder down to child folders/projects")
+    parser.add_argument(
+        "--cross-sa-project-allowed",
+        dest="cross_sa_project_allowed",
+        nargs="*",
+        metavar="PROJECT_ID",
+        help=(
+            "Model attack paths where the actAs SA is in a DIFFERENT project than the resource "
+            "being created (Cloud Run/Build/Scheduler). Off by default because GCP enforces "
+            "iam.disableCrossProjectServiceAccountUsage at the project level. "
+            "Use 'all' (or pass the flag with no args) to allow cross-project paths for every "
+            "project, or supply a space-separated list of project IDs whose "
+            "iam.disableCrossProjectServiceAccountUsage constraint has been disabled "
+            "(e.g. --cross-sa-project-allowed proj-a proj-b). "
+            "Only project-specific filtering avoids false positives for well-configured projects."
+        ),
+    )
+    parser.add_argument(
+        "--no-auto-cross-project",
+        dest="no_auto_cross_project",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable the automatic cross-project actAs detection that enables cross-project "
+            "paths for SA home-projects whose org policy leaves "
+            "iam.disableCrossProjectServiceAccountUsage not_enforced. Has no effect without "
+            "org-policy data, and is ignored when --cross-sa-project-allowed is given."
+        ),
+    )
+    parser.add_argument(
+        "--low-memory",
+        dest="low_memory",
+        action="store_true",
+        default=False,
+        help=(
+            "Stream the multi-permission (combo) edge pass rule-by-rule instead of building "
+            "every combo event at once. Lowers the peak memory of the combo build (where very "
+            "large graphs OOM) at the cost of a second rule-matching pass (slower). Output is "
+            "identical to a normal run."
+        ),
+    )
+    parser.add_argument(
+        "--include-resource-iam",
+        dest="include_resource_iam",
+        action="store_true",
+        default=False,
+        help=(
+            "Include setIamPolicy edges that only grant resource-level takeover "
+            "(sa_token_theft_without_actas=false/partial). By default these are hidden "
+            "because they do NOT allow reaching the attached SA without actAs. "
+            "Enable to see all setIamPolicy edges regardless."
+        ),
+    )
+    parser.add_argument(
+        "--cond-eval",
+        action="store_true",
+        help="Narrow conditioned IAM grants using recognised resource.name/resource.type CEL predicates (conservative; a condition it cannot fully account for is left un-narrowed, never dropped)",
+    )
+    parser.add_argument(
+        "--deny-policies",
+        dest="deny_policies",
+        action="store_true",
+        help=(
+            "Factor IAM v2 Deny Policies (iam_deny_policies) into the graph as a FINAL filter: "
+            "rewrite the allow graph to effective access (allow minus deny). A grant fully "
+            "blocked by a deny is DROPPED; a group grant narrowed by an exemption is re-pointed "
+            "to the surviving member(s) (a single survivor becomes a single-user edge); affected "
+            "edges are flagged deny_policy_in_play. Deny inherits downward (org/folder -> "
+            "descendants). Requires enum_gcp_policy_bindings to have collected deny policies."
+        ),
+    )
+    parser.add_argument(
+        "--exclude-service-agents",
+        action="store_true",
+        help=(
+            "Exclude nodes classified as service agents from the generated OpenGraph snapshot "
+            "before persistence, and drop edges connected to those nodes."
+        ),
+    )
+
+    # Step selection
+    parser.add_argument("--groups", action="store_true", help="Run users/groups mapping step")
+    parser.add_argument("--iam-bindings", action="store_true", help="Run IAM bindings graph step")
+    parser.add_argument("--inferred-permissions", action="store_true", help="Run inferred credential-permissions graph step")
+    parser.add_argument("--resource-expansion", action="store_true", help="Run resource expansion graph step")
+
+    return parser.parse_args(user_args)
+
+
+def _decode_json_field(raw_value) -> dict:
+    decoded = parse_json_value(raw_value, default={})
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _load_existing_opengraph_from_db(session) -> tuple[list[OpenGraphNode], list[OpenGraphEdge]]:
+    """
+    Rehydrate persisted OpenGraph rows back into in-memory nodes/edges for re-export.
+
+    Reads the workspace-scoped opengraph_nodes/opengraph_edges tables (--use-existing-
+    opengraph-db path), decodes properties_json, and backfills name/display_name. Rows
+    missing a required id/type are skipped. Main-thread only (session.get_data).
+    """
+    node_rows = session.get_data("opengraph_nodes") or []
+    edge_rows = session.get_data("opengraph_edges") or []
+
+    nodes: list[OpenGraphNode] = []
+    for row in node_rows:
+        if not isinstance(row, dict):
+            continue
+        node_id = str(row.get("node_id") or "").strip()
+        node_type = str(row.get("node_type") or "").strip()
+        if not node_id or not node_type:
+            continue
+        props = _decode_json_field(row.get("properties_json"))
+        if not props.get("name"):
+            props["name"] = str(row.get("name") or "").strip() or node_id
+        if not props.get("display_name"):
+            props["display_name"] = str(row.get("display_name") or "").strip() or props["name"]
+        nodes.append(OpenGraphNode(node_id=node_id, node_type=node_type, properties=props))
+
+    edges: list[OpenGraphEdge] = []
+    for row in edge_rows:
+        if not isinstance(row, dict):
+            continue
+        source_id = str(row.get("source_id") or "").strip()
+        destination_id = str(row.get("destination_id") or "").strip()
+        edge_type = str(row.get("edge_type") or "").strip()
+        if not source_id or not destination_id or not edge_type:
+            continue
+        props = _decode_json_field(row.get("properties_json"))
+        edges.append(
+            OpenGraphEdge(
+                source_id=source_id,
+                destination_id=destination_id,
+                edge_type=edge_type,
+                properties=props,
+            )
+        )
+    return nodes, edges
+
+
+def _emit_binding_coverage_warnings(context) -> None:
+    binding_coverage = dict(context.get_artifact("binding_permission_map_coverage") or {})
+    unsupported_rules = list(binding_coverage.get("unsupported_rules") or [])
+    unmapped_permissions = list(binding_coverage.get("unmapped_permissions") or [])
+    if not unsupported_rules:
+        return
+    print(
+        "[!] IAM binding rule coverage warning: some dangerous-edge rules reference permissions that are "
+        "not mapped in og_permission_to_roles_map.json. Those rules will be skipped for IAM-binding graphing."
+    )
+    if unmapped_permissions:
+        print(f"    Unmapped permissions: {', '.join(sorted(set(str(p) for p in unmapped_permissions if str(p))))}")
+    for record in unsupported_rules:
+        rule_name = str(record.get("rule_name") or "").strip() or "<unknown_rule>"
+        rule_variant = str(record.get("rule_variant_id") or "").strip()
+        missing = [str(permission or "").strip() for permission in (record.get("missing_permissions") or []) if str(permission or "").strip()]
+        label = f"{rule_name} ({rule_variant})" if rule_variant else rule_name
+        print(f"    Skipping rule {label}: unmapped permissions -> {', '.join(missing)}")
+
+
+# Destination node types that keep a ROLE_OWNER/ROLE_EDITOR edge in the default graph: the
+# service account (identity assumption) and the hierarchy scopes (self-grant any role = PE).
+_OWNER_EDITOR_PE_DESTINATION_TYPES = frozenset(
+    {"GCPServiceAccount", "GCPOrganization", "GCPFolder", "GCPProject"}
+)
+_OWNER_EDITOR_EDGE_KINDS = frozenset({"ROLE_OWNER", "ROLE_EDITOR"})
+
+
+def _filter_resource_only_edges(builder) -> int:
+    """Remove edges that grant resource-level control but NOT privilege escalation on their own
+    (reaching the attached SA still needs actAs, which is captured elsewhere). Hidden by default;
+    shown with --include-resource-iam. Returns the number of edges removed.
+
+    Two classes:
+      (a) setIamPolicy edges on resources (sa_token_theft_without_actas=false/"partial":
+          bucket/compute/KMS/cloud-run), identified by edge KIND; and
+      (b) ROLE_OWNER/ROLE_EDITOR fan-out to NON-IDENTITY resources. owner/editor both hold
+          iam.serviceAccounts.actAs + serviceAccountKeys.create, so their real PE path is the
+          ROLE_OWNER/EDITOR -> service-account edge (kept) and self-grant at a scope
+          (ROLE_OWNER/EDITOR -> org/folder/project, kept). Their edges to VMs/buckets/KMS/etc.
+          are pure resource control -> hidden by default.
+
+    Resource nodes (resource:<name>) are structurally dead ends — RunsAs edges live on
+    cap:UPDATE:<name> clones — so no RunsAs cleanup pass is needed here.
+    """
+    from gcpwn.modules.opengraph.utilities.helpers.graph.constants import load_resource_iam_edge_types
+
+    resource_iam_edge_types = load_resource_iam_edge_types()
+    removed: list[tuple[str, str, str]] = []
+    for key in list(builder.edge_map):
+        _src, kind, dst = key
+        if kind in resource_iam_edge_types:
+            removed.append(key)
+        elif kind in _OWNER_EDITOR_EDGE_KINDS:
+            dst_node = builder.node_map.get(dst)
+            dst_type = getattr(dst_node, "node_type", "") if dst_node else ""
+            if dst_type not in _OWNER_EDITOR_PE_DESTINATION_TYPES:
+                removed.append(key)
+    for key in removed:
+        del builder.edge_map[key]
+    return len(removed)
+
+
+def _run_iam_bindings_stage(context) -> dict[str, object]:
+    """Stage 2 runner: resolve IAM policy bindings into the graph and surface coverage warnings."""
+    build_resolved_binding_entries(context)
+    step_stats = dict(context.get_artifact("iam_policy_bindings_stage_stats") or {})
+    _emit_binding_coverage_warnings(context)
+    return step_stats
+
+
+def _selected_stage_keys(*, args, run_all_steps: bool, has_allow_bindings: bool) -> set[str]:
+    """Resolve selected stage keys from CLI switches + available source artifacts."""
+    selection_rules: tuple[tuple[bool, str], ...] = (
+        (run_all_steps or args.groups, "users_groups"),
+        ((run_all_steps or args.iam_bindings) and has_allow_bindings, "iam_bindings"),
+        (run_all_steps or args.inferred_permissions, "inferred_permissions"),
+        (run_all_steps or args.resource_expansion, "resource_expansion"),
+    )
+    return {stage_key for enabled, stage_key in selection_rules if enabled}
+
+
+def _print_trim_summary(trim_stats: dict[str, dict[str, int]]) -> None:
+    """Render user-facing trim summaries for non-zero trim results."""
+    trim_messages: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+        (
+            "service_account_binding_islands",
+            "[*] Pruned isolated service-account IAM-binding islands",
+            ("pairs", "key_islands", "nodes", "edges"),
+        ),
+        (
+            "orphan_implied_bindings",
+            "[*] Pruned orphan implied-IAM-binding nodes",
+            ("implied_bindings", "nodes", "edges"),
+        ),
+        (
+            "non_escalation_simple_bindings",
+            "[*] Pruned non-escalation simple IAM-binding nodes (default mode; use --include-all to keep)",
+            ("simple_bindings", "nodes", "edges"),
+        ),
+        (
+            "isolated_service_accounts",
+            "[*] Pruned isolated service-account nodes",
+            ("service_accounts", "nodes", "edges"),
+        ),
+    )
+    for stat_key, prefix, output_keys in trim_messages:
+        stat = dict(trim_stats.get(stat_key) or {})
+        if not any(int(value or 0) > 0 for value in stat.values()):
+            continue
+        details = []
+        for output_key in output_keys:
+            if output_key == "pairs":
+                details.append(f"pairs={int(stat.get('pairs_removed', 0))}")
+            elif output_key == "key_islands":
+                details.append(f"key_islands={int(stat.get('key_islands_removed', 0))}")
+            elif output_key == "implied_bindings":
+                details.append(f"implied_bindings={int(stat.get('implied_bindings_removed', 0))}")
+            elif output_key == "simple_bindings":
+                details.append(f"simple_bindings={int(stat.get('non_escalation_simple_bindings_removed', 0))}")
+            elif output_key == "service_accounts":
+                details.append(f"service_accounts={int(stat.get('isolated_service_accounts_removed', 0))}")
+            elif output_key == "nodes":
+                details.append(f"nodes={int(stat.get('nodes_removed', 0))}")
+            elif output_key == "edges":
+                details.append(f"edges={int(stat.get('edges_removed', 0))}")
+        print(f"{prefix} ({', '.join(details)}).")
+
+
+def _coerce_bool_flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    token = str(value or "").strip().lower()
+    return token in {"1", "true", "t", "yes", "y"}
+
+
+def _exclude_service_agent_nodes(
+    nodes: list[OpenGraphNode],
+    edges: list[OpenGraphEdge],
+) -> tuple[list[OpenGraphNode], list[OpenGraphEdge], dict[str, int]]:
+    service_agent_node_ids = {
+        str(node.node_id or "").strip()
+        for node in (nodes or [])
+        if str(node.node_id or "").strip()
+        and _coerce_bool_flag(dict(node.properties or {}).get("is_service_agent", False))
+    }
+    if not service_agent_node_ids:
+        return (
+            list(nodes or []),
+            list(edges or []),
+            {
+                "service_agent_nodes_removed": 0,
+                "edges_removed": 0,
+            },
+        )
+
+    filtered_nodes = [
+        node
+        for node in (nodes or [])
+        if str(node.node_id or "").strip() not in service_agent_node_ids
+    ]
+    filtered_edges = [
+        edge
+        for edge in (edges or [])
+        if str(edge.source_id or "").strip() not in service_agent_node_ids
+        and str(edge.destination_id or "").strip() not in service_agent_node_ids
+    ]
+
+    # Cascade: iambinding nodes whose only principals were service agents now have
+    # zero incoming edges.  They form disconnected floating sub-graphs in BloodHound
+    # (no principal can reach them).  Remove them and their outgoing edges too.
+    incoming_dsts = {str(e.destination_id or "").strip() for e in filtered_edges}
+    orphaned_iambinding_ids = {
+        str(n.node_id or "").strip()
+        for n in filtered_nodes
+        if str(n.node_id or "").startswith("iambinding:")
+        and str(n.node_id or "").strip() not in incoming_dsts
+    }
+    if orphaned_iambinding_ids:
+        filtered_nodes = [
+            n for n in filtered_nodes
+            if str(n.node_id or "").strip() not in orphaned_iambinding_ids
+        ]
+        filtered_edges = [
+            e for e in filtered_edges
+            if str(e.source_id or "").strip() not in orphaned_iambinding_ids
+        ]
+
+    return (
+        filtered_nodes,
+        filtered_edges,
+        {
+            "service_agent_nodes_removed": len(nodes or []) - len(filtered_nodes),
+            "edges_removed": len(edges or []) - len(filtered_edges),
+        },
+    )
+
+
+def run_module(user_args, session):
+    """
+    OpenGraph module entry point: build the BloodHound graph and export it.
+
+    Module-contract function: run_module(user_args, session) -> 1 on success, -1 on
+    failure. Orchestrates the five-phase pipeline (parse args -> build shared
+    OpenGraphBuildContext -> run the selected stages in fixed _STAGE_REGISTRY order ->
+    apply default-mode trims -> persist) and then exports single-file (and optional
+    split) graph JSON. Runs entirely on the main thread; stages share one
+    OpenGraphBuilder and all DB reads/writes (session.get_data / persist_opengraph) stay
+    here, never in worker threads.
+
+    Modes:
+    - default: rebuild the graph from cached SQLite tables and persist (--reset clears
+      this workspace's prior graph first).
+    - --use-existing-opengraph-db: skip the rebuild and re-export from persisted
+      opengraph_nodes/opengraph_edges.
+    With no explicit stage flag all stages run; if iam_allow_policies is empty the IAM
+    bindings stage is skipped (and is an error when explicitly requested via
+    --iam-bindings).
+    """
+    # Phase 1: parse args + mode selection.
+    args = _parse_args(user_args)
+
+    should_run_graph_build = True
+    use_existing_opengraph_db = bool(args.use_existing_opengraph_db)
+    if use_existing_opengraph_db:
+        should_run_graph_build = False
+
+    # Data source: the workspace SQLite tables (default) or a Cloud Asset Inventory
+    # export file. The CAI source serves get_data() from the mapped export and
+    # delegates output/path/config calls to the real session.
+    data_source = session
+    if getattr(args, "cai_file", None):
+        if use_existing_opengraph_db:
+            print("[X] --cai-file cannot be combined with --use-existing-opengraph-db.")
+            return -1
+        from gcpwn.modules.gcp.assetinventory.utilities.cai_source import CaiFileSource
+        try:
+            data_source = CaiFileSource(session, args.cai_file)
+        except Exception as exc:
+            print(f"[X] Failed to read CAI export file {args.cai_file!r}: {exc}")
+            return -1
+        summary = ", ".join(f"{t}={n}" for t, n in sorted(data_source.table_summary.items())) or "(no mapped rows)"
+        print(f"[*] Building OpenGraph from CAI export {args.cai_file} "
+              f"({data_source.record_count} assets -> {summary}).")
+
+    nodes: list[OpenGraphNode] = []
+    edges: list[OpenGraphEdge] = []
+    exported_path = ""
+
+    if should_run_graph_build:
+        # resource_expansion depends on all prior stages, so it must not suppress run_all_steps;
+        # --resource-expansion alone means "run everything and include resource expansion".
+        run_all_steps = not any([args.groups, args.iam_bindings, args.inferred_permissions])
+        if args.cond_eval:
+            print("[*] --cond-eval enabled; narrowing conditioned grants by recognised resource.name/resource.type CEL predicates (a half-understood condition is left un-narrowed, never dropped).")
+
+        raw_allow_bindings = data_source.get_data("iam_allow_policies") or []
+        if args.iam_bindings and not raw_allow_bindings:
+            print("[X] No IAM policy data was found (iam_allow_policies). Run enum_gcp_policy_bindings first (or pass --cai-file with iam-policy assets).")
+            return -1
+        if run_all_steps and not raw_allow_bindings:
+            print("[*] No IAM policy data was found in SQLite (iam_allow_policies). Skipping IAM bindings step.")
+
+        # Phase 2: build shared context used by all stages.
+        _cross_sa_arg = getattr(args, "cross_sa_project_allowed", None)
+        # None → flag not passed (disabled).  [] or ['all'] → all projects allowed.
+        # ['proj-a', 'proj-b'] → specific SA home-projects where the org policy is disabled.
+        _cross_project = _cross_sa_arg is not None
+        if _cross_project and _cross_sa_arg and "all" not in _cross_sa_arg:
+            _cross_project_sa_projects: frozenset[str] = frozenset(_cross_sa_arg)
+        else:
+            _cross_project_sa_projects = frozenset()
+        if _cross_project:
+            if _cross_project_sa_projects:
+                print(f"[*] --cross-sa-project-allowed: cross-project actAs enabled for SA projects: {', '.join(sorted(_cross_project_sa_projects))}")
+            else:
+                print("[*] --cross-sa-project-allowed: cross-project actAs enabled for ALL projects (ensure iam.disableCrossProjectServiceAccountUsage is disabled where needed)")
+        elif not getattr(args, "no_auto_cross_project", False):
+            # No explicit flag: auto-enable cross-project only for SA home-projects whose org
+            # policy explicitly does NOT enforce iam.disableCrossProjectServiceAccountUsage.
+            # Needs org-policy data (asset/orgpolicy enumeration); a no-op otherwise. The
+            # explicit --cross-sa-project-allowed always wins over this.
+            _auto_projects = _auto_cross_project_sa_projects(data_source)
+            if _auto_projects:
+                _cross_project = True
+                _cross_project_sa_projects = _auto_projects
+                print(
+                    "[*] Auto cross-project actAs: org policy leaves "
+                    "iam.disableCrossProjectServiceAccountUsage not_enforced for "
+                    f"{', '.join(sorted(_auto_projects))}; graphing their SAs cross-project "
+                    "(pass --no-auto-cross-project to disable, --cross-sa-project-allowed to override)."
+                )
+        _raw_cats = getattr(args, "edge_categories", None)
+        if not _raw_cats:
+            # Default: priv_escalation only. CAN_READ_SECRET_DATA still loads via its
+            # default_include flag (the single resource-access edge in the default graph).
+            _edge_categories: frozenset[str] = frozenset({"priv_escalation"})
+        elif _raw_cats.strip().lower() == "all":
+            _edge_categories = frozenset()  # empty = all categories
+        else:
+            _edge_categories = frozenset(c.strip() for c in _raw_cats.split(",") if c.strip())
+        context = OpenGraphBuildContext(
+            session=data_source,
+            options=OpenGraphBuildOptions(
+                include_all=args.include_all,
+                expand_inheritance=args.expand_inherited,
+                conditional_evaluation=bool(args.cond_eval),
+                deny_policies=bool(args.deny_policies),
+                debug=args.debug,
+                cross_project=_cross_project,
+                cross_project_sa_projects=_cross_project_sa_projects,
+                edge_categories=_edge_categories,
+                include_resource_iam=bool(getattr(args, "include_resource_iam", False)),
+                low_memory=bool(getattr(args, "low_memory", False)),
+            ),
+        )
+
+        UtilityTools.dlog(
+            args.debug,
+            "opengraph explicit steps selected",
+            groups=bool(args.groups),
+            iam_bindings=bool(args.iam_bindings),
+            inferred_permissions=bool(args.inferred_permissions),
+            resource_expansion=bool(args.resource_expansion),
+        )
+        UtilityTools.dlog(args.debug, "opengraph run all steps", enabled=run_all_steps)
+
+        # Phase 3: stage selection and execution (fixed stage order from _STAGE_REGISTRY).
+        stage_runners = {
+            "users_groups": build_users_groups_graph,
+            "iam_bindings": _run_iam_bindings_stage,
+            "inferred_permissions": build_iam_inferred_permissions_graph,
+            "resource_expansion": build_resource_expansion_graph,
+        }
+        selected_stage_keys = _selected_stage_keys(
+            args=args,
+            run_all_steps=run_all_steps,
+            has_allow_bindings=bool(raw_allow_bindings),
+        )
+        selected_stages = [stage for stage in _STAGE_REGISTRY if stage["key"] in selected_stage_keys]
+
+        UtilityTools.dlog(
+            args.debug,
+            "opengraph stage registry",
+            stages=[
+                {
+                    "id": stage["id"],
+                    "key": stage["key"],
+                    "title": stage["title"],
+                }
+                for stage in _STAGE_REGISTRY
+            ],
+        )
+
+        for step_index, stage in enumerate(selected_stages, start=1):
+            step, step_id, step_title = stage["key"], stage["id"], stage["title"]
+
+            before_nodes, before_edges = context.counts()
+            print(f"[*] Step {step_index} [{step_id}]: {step} ({step_title})")
+
+            runner = stage_runners[step]
+            step_stats = runner(context) or {}
+
+            context.record_step(step, step_stats)
+            after_nodes, after_edges = context.counts()
+            print(
+                f"[*] Completed {step}: +{max(0, after_nodes - before_nodes)} nodes, "
+                f"+{max(0, after_edges - before_edges)} edges"
+            )
+            UtilityTools.dlog(args.debug, "opengraph step stats", step=step, stats=step_stats)
+
+        # Phase 3.4: resource-only edge filter (hidden unless --include-resource-iam).
+        if not bool(getattr(args, "include_resource_iam", False)):
+            _removed_count = _filter_resource_only_edges(context.builder)
+            if _removed_count:
+                print(
+                    f"[*] Resource IAM filter: removed {_removed_count} resource-only edge(s) — "
+                    f"setIamPolicy on resources + owner/editor fan-out to non-identity resources "
+                    f"(use --include-resource-iam to show them)"
+                )
+
+        # Phase 3.5: deny-policy FINAL filter (opt-in) -- rewrite allow graph to effective
+        # access (allow minus deny) before it is snapshotted to node/edge lists.
+        if getattr(args, "deny_policies", False):
+            from gcpwn.modules.opengraph.utilities.stage_6_deny_policies import apply_deny_policies
+            deny_stats = apply_deny_policies(context)
+            context.record_step("deny_policies", deny_stats)
+
+        # Phase 3.7: deduplicate CAP nodes with identical outgoing edge sets.
+        print("[*] Deduplicating capability nodes...", flush=True)
+        dedup_nodes_removed, dedup_edges_removed = context.builder.dedup_cap_nodes()
+        if dedup_nodes_removed or dedup_edges_removed:
+            print(
+                f"[*] CAP node dedup: merged {dedup_nodes_removed} redundant CAP nodes, "
+                f"removed {dedup_edges_removed} duplicate edges."
+            )
+
+        # Phase 4: apply default-mode trim passes.
+        print("[*] Finalizing graph: snapshotting nodes/edges and applying trim passes...", flush=True)
+        nodes = list(context.builder.node_map.values())
+        edges = list(context.builder.edge_map.values())
+        # The builder's maps are not read again (trim / breakdown / persist / export all work
+        # from the nodes/edges lists above). Drop them now so the builder stops pinning the
+        # whole in-memory graph: then export's consume-free conversion is the last reference
+        # to each node/edge object and can free it as it converts, instead of holding the
+        # originals + the converted copy together through the entire (large-graph) export.
+        context.builder.node_map.clear()
+        context.builder.edge_map.clear()
+        # Same reasoning for the context's own heavy caches/artifacts: every stage has run and
+        # nothing below (trim / breakdown / persist / export) reads them again. These hold the
+        # single largest combo-build transients -- the fanned-out resolved_bindings_composite
+        # entry list, the member_binding_index, the scope/resource indexes and the raw policy
+        # rows -- so releasing them here frees that memory BEFORE export's conversion transiently
+        # doubles the graph, instead of letting it coexist with the export peak.
+        context.artifacts.clear()
+        context._simplified_hierarchy_permissions_cache.clear()
+        context._scope_resource_indexes_cache = None
+        context._rows_cache.clear()
+        context._hierarchy_metadata = None
+        if args.exclude_service_agents:
+            nodes, edges, service_agent_exclusion_stats = _exclude_service_agent_nodes(nodes, edges)
+            print(
+                "[*] Excluded service-agent nodes from generated graph "
+                f"(nodes_removed={int(service_agent_exclusion_stats.get('service_agent_nodes_removed', 0))}, "
+                f"edges_removed={int(service_agent_exclusion_stats.get('edges_removed', 0))})."
+            )
+        if args.include_all:
+            trim_stats = {
+                "service_account_binding_islands": {"pairs_removed": 0, "key_islands_removed": 0, "nodes_removed": 0, "edges_removed": 0},
+                "orphan_implied_bindings": {"implied_bindings_removed": 0, "nodes_removed": 0, "edges_removed": 0},
+                "isolated_service_accounts": {"isolated_service_accounts_removed": 0, "nodes_removed": 0, "edges_removed": 0},
+            }
+        else:
+            nodes, edges, trim_stats = apply_final_allowlist_trims(nodes, edges)
+        _print_trim_summary(trim_stats)
+        _print_edge_breakdown(nodes, edges)
+
+        # Phase 5: persist generated graph snapshot.
+        if getattr(args, "cai_file", None):
+            print("[*] CAI-file mode: skipping persist to workspace opengraph tables (export only).")
+        else:
+            print(f"[*] Persisting graph to SQLite ({len(nodes)} nodes, {len(edges)} edges)...", flush=True)
+            persist_opengraph(session, nodes, edges, clear_existing=args.reset)
+    elif use_existing_opengraph_db:
+        nodes, edges = _load_existing_opengraph_from_db(session)
+        if not nodes and not edges:
+            print("[X] No existing OpenGraph data found in SQLite (opengraph_nodes/opengraph_edges).")
+            print("    Run process_og_gcpwn_data without --use-existing-opengraph-db first.")
+            return -1
+        print(f"[*] Loaded existing OpenGraph graph from SQLite: {len(nodes)} nodes, {len(edges)} edges.")
+
+    should_export_graph_json = bool(nodes or edges)
+    # Capture counts before export: export_opengraph_json consumes (empties) the input
+    # lists so the original node/edge objects free as the export dicts build, instead of
+    # both copies co-existing at peak.
+    graph_node_count = len(nodes)
+    graph_edge_count = len(edges)
+    if should_export_graph_json:
+        output_path, split_output_dir = _resolve_export_paths(session, args)
+        if bool(getattr(args, "split_json_only", False)) and not bool(args.split_json_output):
+            print("[!] --split-json-only has no effect without --split-json-output; writing the combined file as usual.")
+
+        if not args.split_json_output:
+            # Common path: stream the single file per section (convert+sort+write nodes, free,
+            # then edges) so the two converted-section lists never coexist -- roughly halves the
+            # export peak on combo-heavy graphs. Byte-identical to export + write.
+            _stream_export_graph_json(output_path, nodes, edges, debug=args.debug)
+            exported_path = output_path
+        else:
+            # Split path needs the full in-memory payload to section it.
+            payload = export_opengraph_json(nodes, edges, debug=args.debug)
+            if bool(getattr(args, "split_json_only", False)):
+                print("[*] --split-json-only: skipping the combined single-file export; writing split files only.")
+            else:
+                _write_graph_json_with_progress(output_path, payload)
+                exported_path = output_path
+            try:
+                selected_sections = _parse_split_sections(getattr(args, "split_json_sections", None))
+                max_split_size_mb = float(getattr(args, "split_json_max_size_mb", 50.0) or 50.0)
+                if max_split_size_mb <= 0:
+                    raise ValueError("--split-json-max-size-mb must be greater than 0")
+                split_size_tolerance_mb = float(getattr(args, "split_json_size_tolerance_mb", 25.0) or 0.0)
+                if split_size_tolerance_mb < 0:
+                    raise ValueError("--split-json-size-tolerance-mb cannot be negative")
+                split_json_threads = int(getattr(args, "split_json_threads", 1) or 1)
+                if split_json_threads <= 0:
+                    raise ValueError("--split-json-threads must be greater than 0")
+                split_files, manifest_path = _write_split_outputs(
+                    base_output_path=output_path,
+                    payload=payload,
+                    selected_sections=selected_sections,
+                    max_size_mb=max_split_size_mb,
+                    size_tolerance_mb=split_size_tolerance_mb,
+                    split_threads=split_json_threads,
+                    split_output_dir=split_output_dir,
+                    debug=args.debug,
+                )
+                print(
+                    f"[*] Wrote {len(split_files) - 1} split JSON graph file(s) "
+                    f"across {len(selected_sections)} selected section(s)."
+                )
+                print(f"[*] Saved split manifest to {manifest_path}")
+            except ValueError as exc:
+                print(f"[X] Split-output configuration error: {exc}")
+                return -1
+
+    if should_run_graph_build:
+        print(f"[*] OpenGraph generation complete. Nodes: {graph_node_count} | Edges: {graph_edge_count}")
+    if exported_path:
+        print(f"[*] Saved graph JSON to {exported_path}")
+    return 1

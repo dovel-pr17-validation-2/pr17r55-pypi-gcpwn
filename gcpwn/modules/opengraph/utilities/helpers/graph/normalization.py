@@ -1,0 +1,140 @@
+from __future__ import annotations
+
+from collections.abc import Iterable
+from typing import Any
+
+_RESOURCE_TYPE_NORMALIZATION: dict[str, str] = {
+    # Keep this intentionally small: canonical resource_type tokens should be emitted upstream.
+    "organization": "org",
+    "organizations": "org",
+    "folders": "folder",
+    "projects": "project",
+    "service-accounts": "service-account",
+    "workload-identity-pools": "workloadidentitypool",
+    "workload-identity-providers": "workloadidentityprovider",
+    "kmskey": "kmscryptokey",
+}
+
+RESOURCE_TOKEN_TO_NODE_TYPE: dict[str, str] = {
+    "org": "GCPOrganization",
+    "folder": "GCPFolder",
+    "project": "GCPProject",
+    "bucket": "GCPBucket",
+    "cloudfunction": "GCPCloudFunction",
+    "computeinstance": "GCPComputeInstance",
+    "service-account": "GCPServiceAccountResource",
+    "kmskeyring": "GCPKmsKeyRing",
+    "kmscryptokey": "GCPKmsCryptoKey",
+    "kmskeyversion": "GCPKmsCryptoKeyVersion",
+    "cloudrunservice": "GCPCloudRunService",
+    "cloudrunjob": "GCPCloudRunJob",
+    "workloadidentitypool": "GCPWorkloadIdentityPool",
+    "workloadidentityprovider": "GCPWorkloadIdentityProvider",
+    "cloudsqlinstance": "GCPCloudSQLInstance",
+    "artifactregistryrepo": "GCPArtifactRegistryRepo",
+    "pubsubtopic": "GCPPubSubTopic",
+    "pubsubsubscription": "GCPPubSubSubscription",
+    "pubsubschema": "GCPPubSubSchema",
+    "pubsubsnapshot": "GCPPubSubSnapshot",
+    "spannerinstance": "GCPSpannerInstance",
+    "spannerdatabase": "GCPSpannerDatabase",
+    "servicedirectorynamespace": "GCPServiceDirectoryNamespace",
+    "servicedirectoryservice": "GCPServiceDirectoryService",
+    "bigquerydataset": "GCPBigQueryDataset",
+    "bigquerytable": "GCPBigQueryTable",
+    "bigqueryroutine": "GCPBigQueryRoutine",
+    "cloudtasksqueue": "GCPCloudTasksQueue",
+    "secrets": "GCPSecret",
+    "cloudbuildbuild": "GCPCloudBuildBuild",
+    # Capability node types for via:capability combo rules
+    "cloudschedulerjob": "GCPCloudSchedulerJob",
+    "cloudbuildtrigger": "GCPCloudBuildTrigger",
+    "cloudrunworkerpool": "GCPCloudRunWorkerPool",
+    "cloudworkflowsexecution": "GCPCloudWorkflowsExecution",
+    "batchjob": "GCPBatchJob",
+    "dataprocbatch": "GCPDataprocBatch",
+    "dataprocworkflowtemplate": "GCPDataprocWorkflowTemplate",
+    "dataflowjob": "GCPDataflowJob",
+    "dataflowdatapipeline": "GCPDataflowDataPipeline",
+    "dataplextask": "GCPDataplexTask",
+    "vertexcustomjob": "GCPVertexCustomJob",
+    "vertexpipelinejob": "GCPVertexPipelineJob",
+    "vertexreasoningengine": "GCPVertexReasoningEngine",
+    "vertexendpoint": "GCPVertexEndpoint",
+    "appengineversion": "GCPAppEngineVersion",
+    "appengineapp": "GCPAppEngineApp",
+    "composerenv": "GCPComposerEnv",
+    "appintegration": "GCPAppIntegration",
+    "firebasebackend": "GCPFirebaseBackend",
+    "notebooksworkbench": "GCPNotebooksWorkbench",
+    "notebooksexecution": "GCPNotebooksExecution",
+    "tpunode": "GCPTpuNode",
+    "workstation": "GCPWorkstation",
+    "datafusioninstance": "GCPDataFusionInstance",
+    "clouddeployrelease": "GCPCloudDeployRelease",
+    "deploymentmanagerdeployment": "GCPDeploymentManagerDeployment",
+    "inframanagerdeployment": "GCPInfraManagerDeployment",
+    "vmmigrationimageimport": "GCPVMMigrationImageImport",
+    "vmmigrationmigratingvm": "GCPVMMigrationMigratingVm",
+    "bqsparkprocedure": "GCPBQSparkProcedure",
+    "apigateway": "GCPApiGateway",
+    # GKE cluster and GKEHub fleet membership (targets for GKE/GKEHub PE edges).
+    "k8scluster": "GCPGKECluster",
+    "fleetmembership": "GCPFleetMembership",
+    # Sensitive-resource-access read targets.
+    "apikey": "GCPApiKey",
+    "gitrepolink": "GCPDeveloperConnectGitRepoLink",
+    "bigqueryconnection": "GCPBigQueryConnection",
+}
+
+
+def normalize_scope_type_token(scope_type: str | None) -> str:
+    return str(scope_type or "").strip().lower().replace("_", "-").replace(" ", "-")
+
+
+def normalize_resource_type_token(resource_type: str | None) -> str:
+    token = normalize_scope_type_token(resource_type)
+    return _RESOURCE_TYPE_NORMALIZATION.get(token, token)
+
+
+def canonical_scope_type(scope_type: str | None, scope_name: str | None = None) -> str:
+    raw_token = normalize_scope_type_token(scope_type)
+    scope_name_token = str(scope_name or "").strip().lower()
+    if raw_token == "services":
+        if "/namespaces/" in scope_name_token:
+            return "servicedirectoryservice"
+        return "cloudrunservice"
+    token = normalize_resource_type_token(raw_token)
+    if token and token not in {"resource", "abstract"}:
+        return token
+    if scope_name_token.startswith("organizations/"):
+        return "org"
+    if scope_name_token.startswith("folders/"):
+        return "folder"
+    if scope_name_token.startswith("projects/"):
+        return "project"
+    return token or "resource"
+
+
+def normalized_token_list(values: Any) -> list[str]:
+    if values is None:
+        return []
+    if isinstance(values, dict):
+        source_values: Iterable[Any] = values.keys()
+    elif isinstance(values, (list, tuple, set, frozenset)):
+        source_values = values
+    elif isinstance(values, Iterable) and not isinstance(values, (str, bytes)):
+        source_values = values
+    else:
+        source_values = [values]
+    return sorted(
+        {
+            token
+            for value in source_values
+            if (token := str(value or "").strip())
+        }
+    )
+
+
+def normalized_token_frozenset(values: Any) -> frozenset[str]:
+    return frozenset(normalized_token_list(values))

@@ -1,0 +1,136 @@
+from __future__ import annotations
+
+from typing import Any
+
+from gcpwn.core.utils.module_helpers import load_mapping_data
+
+# Edge rules are loaded from a dedicated data file so contributors can add
+# paths without editing code.  The file is organised into named categories;
+# callers may filter to a subset via the `categories` parameter.
+_DEFINED_EDGES_FILE = "og_defined_edges.json"
+
+# Top-level keys that are not rule categories.
+_NON_CATEGORY_KEYS: frozenset[str] = frozenset({"_schema", "collapsed_role_edges"})
+
+
+def _as_rule_mapping(value: Any) -> dict[str, dict[str, Any]]:
+    """Flatten a category dict into ``{edge_name: rule}``.
+
+    Supports two layouts transparently:
+    - Flat: ``{"EDGE_NAME": {rule}, ...}``
+    - Service-grouped: ``{"compute": {"EDGE_NAME": {rule}, ...}, ...}``
+
+    A service-group sub-key is detected when its value is a dict that contains
+    no ``"permissions"`` or ``"requires"`` key at the top level — i.e. it is a
+    group of rules rather than a rule itself.
+    """
+    if not isinstance(value, dict):
+        return {}
+    output: dict[str, dict[str, Any]] = {}
+    for raw_name, raw_rule in value.items():
+        name = str(raw_name or "").strip()
+        if not name or not isinstance(raw_rule, dict):
+            continue
+        if "permissions" in raw_rule or "requires" in raw_rule or "requires_groups" in raw_rule:
+            output[name] = dict(raw_rule)
+        else:
+            # Service-group sub-dict — recurse one level and merge.
+            output.update(_as_rule_mapping(raw_rule))
+    return output
+
+
+def _as_collapsed_role_mapping(value: Any) -> dict[str, dict[str, str]]:
+    if not isinstance(value, dict):
+        return {}
+    output: dict[str, dict[str, str]] = {}
+    for raw_role, raw_rule in value.items():
+        role_name = str(raw_role or "").strip()
+        if not role_name or not isinstance(raw_rule, dict):
+            continue
+        edge_type = str(raw_rule.get("edge_type") or "").strip()
+        if not edge_type:
+            continue
+        output[role_name] = {
+            "edge_type": edge_type,
+            "description": str(raw_rule.get("description") or "").strip(),
+        }
+    return output
+
+
+def load_privilege_escalation_rules(
+    categories: "frozenset[str] | None" = None,
+) -> "tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, dict[str, str]]]":
+    """Load edge rule mappings from og_defined_edges.json.
+
+    Args:
+        categories: frozenset of category names to include (e.g.
+            ``frozenset({"priv_escalation"})``).  ``None`` or empty frozenset
+            includes every category (backward-compatible default used by
+            module-level initialisation and tests).
+
+    Returns:
+        ``(single_rules, multi_rules, collapsed_role_edges)`` — single_rules
+        have only ``permissions``; multi_rules have ``requires``.
+    """
+    payload = load_mapping_data(_DEFINED_EDGES_FILE, kind="json")
+    if not isinstance(payload, dict):
+        return {}, {}, {}
+
+    # Legacy flat layout ("rules" key) — still supported transparently.
+    if "rules" in payload:
+        all_raw = _as_rule_mapping(payload.get("rules"))
+    else:
+        # Category layout: merge rules from every matching category.
+        all_raw: dict[str, dict[str, Any]] = {}
+        for key, val in payload.items():
+            if key in _NON_CATEGORY_KEYS:
+                continue
+            if not isinstance(val, dict):
+                continue
+            if categories and key not in categories:
+                # Category not selected, but a rule flagged `default_include` still loads
+                # (keeps CAN_READ_SECRET_DATA on in the default priv_escalation-only set
+                # while the rest of its category stays opt-in).
+                for rule_name, rule in _as_rule_mapping(val).items():
+                    if isinstance(rule, dict) and rule.get("default_include"):
+                        all_raw[rule_name] = rule
+                continue
+            all_raw.update(_as_rule_mapping(val))
+
+    single_rules = {n: r for n, r in all_raw.items() if not r.get("requires") and not r.get("requires_groups")}
+    multi_rules = {n: r for n, r in all_raw.items() if r.get("requires") or r.get("requires_groups")}
+    return (
+        single_rules,
+        multi_rules,
+        _as_collapsed_role_mapping(payload.get("collapsed_role_edges")),
+    )
+
+
+def load_resource_iam_edge_types() -> frozenset[str]:
+    """Return the set of edge types where sa_token_theft_without_actas is False or 'partial'.
+
+    These are setIamPolicy edges that grant resource-level takeover but do NOT
+    allow reaching the attached SA without actAs.  They are hidden by default
+    and shown only with --include-resource-iam.
+
+    NOTE: ROLE_OWNER/ROLE_EDITOR collapsed edges that arise when the contributor
+    has roles/owner or roles/editor are NOT in this set — those are kept regardless
+    because the broad role already implies actAs on everything in the project.
+    """
+    payload = load_mapping_data(_DEFINED_EDGES_FILE, kind="json")
+    if not isinstance(payload, dict):
+        return frozenset()
+    edge_types: set[str] = set()
+    for key, val in payload.items():
+        if key in _NON_CATEGORY_KEYS or not isinstance(val, dict):
+            continue
+        for rule_name, rule in _as_rule_mapping(val).items():
+            v = rule.get("sa_token_theft_without_actas")
+            if v is False or v == "partial":
+                # Single-perm rules omit an explicit edge_type; it defaults to the rule NAME
+                # during normalization, so fall back to the name here (otherwise this set is
+                # empty and the resource-IAM filter silently never fires).
+                et = str(rule.get("edge_type") or rule_name or "").strip()
+                if et:
+                    edge_types.add(et)
+    return frozenset(edge_types)

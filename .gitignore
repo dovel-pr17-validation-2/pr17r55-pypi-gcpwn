@@ -1,0 +1,88 @@
+# Python cache / bytecode
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Test / type / lint caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+.cache/
+.coverage
+.coverage.*
+htmlcov/
+.ipynb_checkpoints/
+
+# Virtual environments
+.venv/
+venv/
+gcp_env/
+
+# Packaging / build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Local tool state
+.codex
+.codex/
+.env
+.env.*
+.python-version
+
+# Claude Code local state (settings, agent worktree staging, session data).
+# Commit shared config deliberately with `git add -f .claude/<file>` if ever needed.
+.claude/
+
+# AI-assistant instruction files (local guidance, not part of the shipped tool).
+# Force-add deliberately with `git add -f CLAUDE.md` if you ever want to share one.
+CLAUDE.md
+AGENTS.md
+AGENT.md
+GEMINI.md
+.cursorrules
+.cursor/
+.aider*
+.github/copilot-instructions.md
+
+# Workspace databases
+databases/*.db
+databases/*.db-shm
+databases/*.db-wal
+
+# Generated output / local scratch
+gcpwn_output/
+GatheredData/
+LoggingMechanism/
+gcpwn.wiki/
+*.wiki/
+*.wiki
+scripts/build_service_agent_patterns.py
+scripts/build_service_agent_patterns_output.json
+scripts/*.txt
+!scripts/build_predfined_perm_to_role_input.txt
+
+# OS/editor noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*.log
+
+# Never commit credential keys
+*my_key.json
+*service-account*.json
+*-sa-key.json
+scratchpad_live/
+
+# Live privilege-escalation validation results (may contain real token snippets / env details)
+privesc-validation/
+permission-research/

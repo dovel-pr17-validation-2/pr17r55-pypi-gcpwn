@@ -1,0 +1,193 @@
+from __future__ import annotations
+
+from collections import defaultdict
+from typing import Any, Callable
+
+
+def collect_rule_events(
+    *,
+    entries: list[Any],
+    rules: list[dict[str, Any]],
+    matches_for_group: Callable[[dict[str, Any], list[Any]], list[dict[str, Any]]],
+    normalize_binding_permission_map: Callable[[dict[str, Any] | None], dict[str, list[str]]],
+    normalized_token_list: Callable[[Any], list[str]],
+    progress_callback: Callable[[int, int, int], None] | None = None,
+    group_progress_callback: Callable[[int, int, int, int, int, str], None] | None = None,
+    cross_project: bool = False,
+    grouped_cache: dict[tuple[bool, bool], list[list[Any]]] | None = None,
+) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    total_rules = len(rules or [])
+    matched_events = 0
+    # The entry-grouping depends only on the (same_scope_required, same_project_required) shape,
+    # not the individual rule. A caller that invokes this per-rule (e.g. --low-memory streaming)
+    # passes a shared `grouped_cache` so the grouping is computed once across all those calls
+    # instead of rebuilt every call; by default it is per-call local.
+    grouped_entries_by_rule_shape: dict[tuple[bool, bool], list[list[Any]]] = (
+        grouped_cache if grouped_cache is not None else {}
+    )
+    for rule_index, rule in enumerate(rules, start=1):
+        same_scope_required = bool(rule.get("same_scope_required", True))
+        # cross_project=True disables same-project partitioning so actors with
+        # create perms in proj-A + actAs on a SA in proj-B are grouped together.
+        same_project_required = False if cross_project else bool(rule.get("same_project_required", False))
+        group_key = (same_scope_required, same_project_required)
+        grouped_entries = grouped_entries_by_rule_shape.get(group_key)
+        if grouped_entries is None:
+            groups: dict[tuple[str, str, str, str, str], list[Any]] = defaultdict(list)
+            for entry in entries:
+                groups[
+                    (
+                        entry.principal_id,
+                        entry.effective_scope_name if same_scope_required else "",
+                        entry.effective_scope_type if same_scope_required else "",
+                        entry.condition_option_id,
+                        entry.project_id if same_project_required else "",
+                    )
+                ].append(entry)
+            grouped_entries = list(groups.values())
+            grouped_entries_by_rule_shape[group_key] = grouped_entries
+
+        # Compute the RULE-LEVEL event fields ONCE per rule and share the (immutable, read-only
+        # downstream -- _emit_events copies them into locals) objects across every event this rule
+        # emits. Previously each event re-ran str()/.strip()/list()/set() on the same rule data,
+        # so a rule with M matches allocated M copies of these -- the bulk of dangerous_events's
+        # memory on broad rules, which is exactly where the combo pass OOMs. Byte-identical: same
+        # values, just not duplicated.
+        _ev_rule_name = str(rule.get("name") or "")
+        _ev_rule_description = str(rule.get("description") or "").strip()
+        _ev_example_command = str(rule.get("example_command") or "").strip()
+        _ev_edge_type = str(rule.get("edge_type") or "HAS_IAM_BINDING")
+        _ev_target_selector = rule.get("target_selector") or {}
+        _ev_requires_groups = list(rule.get("requires_groups") or [])
+        _ev_multi_permission_type = str(rule.get("multi_permission_type") or "simple").strip().lower() or "simple"
+        _ev_combo_hop = rule.get("combo_hop") or {}
+        _ev_targets_from_permissions = set(rule.get("targets_from_permissions") or ())
+        _ev_target_requires_permissions = set(rule.get("target_requires_permissions") or ())
+        _ev_status = str(rule.get("status") or "").strip()
+
+        total_groups = len(grouped_entries)
+        for group_index, group_entries in enumerate(grouped_entries, start=1):
+            matches = matches_for_group(rule, group_entries)
+            for match in matches:
+                contributors = list(match.get("contributors") or [])
+                if not contributors:
+                    continue
+                matched_permissions = set(match.get("matched_permissions") or ())
+                matched_roles = {entry.role_name for entry in contributors}
+                contributor_permission_map = normalize_binding_permission_map(match.get("contributor_permission_map"))
+                evidence_bindings = sorted(set(entry.binding_composite_id for entry in contributors)) or sorted(contributor_permission_map.keys())
+                emission_mode = str(match.get("emission_mode") or "binding").strip().lower()
+                emission_mode = emission_mode if emission_mode in {"binding", "combo"} else "binding"
+
+                # Skip complex combo events where every contributor is a primitive
+                # role (roles/owner or roles/editor). The collapsed ROLE_OWNER/
+                # ROLE_EDITOR single-hop edges already cover these attack paths;
+                # emitting combo/CAP nodes on top adds noise without new information.
+                # Note: single-role combos produce emission_mode="binding", not
+                # "combo", so we gate on combo_hop presence (marks complex rules)
+                # rather than emission_mode.
+                if (
+                    isinstance(rule.get("combo_hop"), dict)
+                    and rule["combo_hop"]
+                    and contributors
+                    and all(
+                        str(getattr(c, "role_name", "") or "").strip().split("_withcond_")[0]
+                        in {"roles/owner", "roles/editor"}
+                        for c in contributors
+                    )
+                ):
+                    continue
+
+                events.append(
+                    {
+                        "rule_name": _ev_rule_name,
+                        "rule_description": _ev_rule_description,
+                        "example_command": _ev_example_command,
+                        "edge_type": _ev_edge_type,
+                        "target_selector": _ev_target_selector,
+                        "contributors": contributors,
+                        "matched_permissions": matched_permissions,
+                        "matched_roles": matched_roles,
+                        "evidence_bindings": evidence_bindings,
+                        "combine_across_bindings": bool(match.get("combine_across_bindings", False)),
+                        "emission_mode": emission_mode,
+                        "contributor_permission_map": contributor_permission_map,
+                        "matched_group_contributors": {
+                            str(group_id): normalized_token_list(binding_ids)
+                            for group_id, binding_ids in (
+                                (match.get("matched_group_contributors") or {}).items()
+                                if isinstance(match.get("matched_group_contributors"), dict)
+                                else ()
+                            )
+                        },
+                        "requires_groups": _ev_requires_groups,
+                        "multi_permission_type": _ev_multi_permission_type,
+                        # target_requires_permissions gates a combo edge on the TARGET SA actually
+                        # holding a precondition permission (e.g. CREATE_VERTEX_KFP_JOB_AS_SA requires
+                        # aiplatform.metadataStores.get). _filter_targets_requiring_perms checks the
+                        # target SA's resolved permissions in sa_project_perms_index, which only
+                        # recognizes permissions present as keys in og_permission_to_roles_map.json;
+                        # the precondition perms are now in that map, so this no longer drops
+                        # legitimate targets (holders via owner/editor/aiplatform.* roles).
+                        "combo_hop": _ev_combo_hop,
+                        "targets_from_permissions": _ev_targets_from_permissions,
+                        "target_requires_permissions": _ev_target_requires_permissions,
+                        "status": _ev_status,
+                        "privilege_escalation": True,
+                    }
+                )
+                matched_events += 1
+            if group_progress_callback:
+                group_progress_callback(
+                    rule_index,
+                    total_rules,
+                    group_index,
+                    total_groups,
+                    matched_events,
+                    str(rule.get("name") or f"rule_{rule_index}"),
+                )
+        if progress_callback:
+            progress_callback(rule_index, total_rules, matched_events)
+    return events
+
+
+def collect_owner_baseline_events(
+    *,
+    entries: list[Any],
+    collapsed_dangerous_role_rules: dict[str, dict[str, str]],
+) -> list[dict[str, Any]]:
+    baseline_role_rules = ("roles/owner", "roles/editor")
+    events: list[dict[str, Any]] = []
+    for role_name in baseline_role_rules:
+        role_rule = dict(collapsed_dangerous_role_rules.get(role_name) or {})
+        edge_type = str(
+            role_rule.get("edge_type")
+            or ("ROLE_OWNER" if role_name == "roles/owner" else "ROLE_EDITOR")
+        ).strip() or ("ROLE_OWNER" if role_name == "roles/owner" else "ROLE_EDITOR")
+        description = str(role_rule.get("description") or "").strip()
+        role_entries = [entry for entry in entries if str(entry.role_name or "").strip() == role_name]
+        for entry in role_entries:
+            events.append(
+                {
+                    "rule_name": edge_type,
+                    "rule_description": description,
+                    "edge_type": edge_type,
+                    "target_selector": {},
+                    "contributors": [entry],
+                    "matched_permissions": set(),
+                    "matched_roles": {entry.role_name},
+                    "evidence_bindings": [entry.binding_composite_id],
+                    "combine_across_bindings": False,
+                    "emission_mode": "binding",
+                    "contributor_permission_map": {entry.binding_composite_id: []},
+                    "matched_group_contributors": {},
+                    "requires_groups": [],
+                    "multi_permission_type": "simple",
+                    "combo_hop": {},
+                    "targets_from_permissions": set(),
+                    "privilege_escalation": False,
+                    "scope_only": True,
+                }
+            )
+    return events
